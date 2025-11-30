@@ -13,11 +13,16 @@ def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
     except AttributeError:
-        base_path = os.path.abspath(".")
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
 root = tk.Tk()
-current_font = font.Font(root=root, family="Arial", size=12)
+# Prefer Arial when available, otherwise pick a sensible default on the system
+preferred_family = "Arial"
+available_fonts = list(font.families())
+if preferred_family not in available_fonts:
+    preferred_family = available_fonts[0] if available_fonts else "TkDefaultFont"
+current_font = font.Font(root=root, family=preferred_family, size=12)
 
 root.title("PixelScript+")
 root.geometry("600x400")
@@ -54,7 +59,7 @@ update_line_counter()
 # Github info
 OWNER = "Northy2410"
 REPO = "PixelScript-Plus"
-CURRENT_VERSION = "1.4.0"
+CURRENT_VERSION = "1.4"
 
 # update check (manual invocation)
 def check_for_update(parent=None, silent=False):
@@ -414,7 +419,7 @@ def open_about():
         "PixelScript+\n"
         f"Version: {CURRENT_VERSION}\n"
         "A simple, extendable text editor.\n"
-        "© 2025 Leaf Technologies."
+        "© 2025 Riley Northcote."
     )
     info_label = tk.Label(about_win, text=info_text, font=("Arial", 14), justify="center")
     info_label.pack(pady=8)
@@ -427,6 +432,29 @@ def open_about():
     close_btn.pack(pady=10)
 
     style_window(about_win, current_theme)
+
+def open_help():
+    help_win = tk.Toplevel(root)
+    help_win.title("help")
+    help_win.geometry("480x160")
+    help_win.resizable(False, False)
+
+    help_msg = (
+        "to report an issue or suggest a feature, click the new issue button after being redirected to the webpage using the button below."
+    )
+    msg = tk.Label(help_win, text=help_msg, font=("Arial", 12), wraplength=440, justify="center")
+    msg.pack(pady=12)
+
+    def open_issues():
+        webbrowser.open("https://github.com/Northy2410/PixelScript-Plus/issues")
+
+    issue_btn = tk.Button(help_win, text="Redirect me", command=open_issues, font=("Arial", 11), width=14)
+    issue_btn.pack(pady=4)
+
+    close_btn = tk.Button(help_win, text="Close", command=help_win.destroy, font=("Arial", 11), width=14)
+    close_btn.pack(pady=4)
+
+    style_window(help_win, current_theme)
 
 def open_settings():
     settings_win = tk.Toplevel(root)
@@ -507,11 +535,13 @@ settings_menu = tk.Menu(menu_bar, tearoff=0)
 settings_menu.add_command(label="Settings", command=open_settings)
 menu_bar.add_cascade(label="Settings", menu=settings_menu)
 
+help_menu = tk.Menu(menu_bar, tearoff=0)
+help_menu.add_command(label="Submit an issue or feature", command=open_help)
+menu_bar.add_cascade(label="Help", menu=help_menu)
+
 root.config(menu=menu_bar)
 
 current_theme = load_settings()
 apply_theme(current_theme)
 
 root.mainloop()
-
-

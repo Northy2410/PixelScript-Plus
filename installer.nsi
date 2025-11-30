@@ -5,7 +5,7 @@
 !define MUI_WELCOMEFINISHPAGE_BITMAP "inslogo.bmp"
 
 Outfile "PixelScript+ Setup.exe"
-Name "PixelScript+ V1.3.2"
+Name "PixelScript+ V1.4"
 InstallDir "$PROGRAMFILES\PixelScript+"
 RequestExecutionLevel admin
 
