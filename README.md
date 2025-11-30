@@ -39,7 +39,7 @@ Please **read the license** before using this software.
 ---
 
 ## Website
-[PixelScript+ Website](pixelscriptplus.co.uk)
+pixelscriptplus.co.uk
 
 ---
 
