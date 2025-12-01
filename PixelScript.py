@@ -8,6 +8,8 @@ import calendar
 from datetime import datetime
 import configparser
 import platform
+import importlib.util
+import traceback
 
 def resource_path(relative_path):
     try:
@@ -59,7 +61,7 @@ update_line_counter()
 # Github info
 OWNER = "Northy2410"
 REPO = "PixelScript-Plus"
-CURRENT_VERSION = "1.4"
+CURRENT_VERSION = "1.5"
 
 # update check (manual invocation)
 def check_for_update(parent=None, silent=False):
@@ -343,6 +345,22 @@ def get_settings_path():
         os.makedirs(folder)
     return os.path.join(folder, "settings.ini")
 
+
+def get_plugins_dir():
+    """Return the plugins directory path and ensure it exists.
+
+    On Windows this will be: %APPDATA%\PixelScriptPlus\plugins
+    On other systems: ~/.pixelscriptplus/plugins
+    """
+    if platform.system() == "Windows":
+        appdata = os.getenv("APPDATA")
+        folder = os.path.join(appdata, "PixelScriptPlus", "plugins")
+    else:
+        folder = os.path.expanduser("~/.pixelscriptplus/plugins")
+    if not os.path.exists(folder):
+        os.makedirs(folder, exist_ok=True)
+    return folder
+
 SETTINGS_FILE = get_settings_path()
 
 def load_settings():
@@ -456,10 +474,30 @@ def open_help():
 
     style_window(help_win, current_theme)
 
+
+def open_website():
+    try:
+        webbrowser.open("https://pixelscriptplus.co.uk")
+    except Exception:
+        try:
+            messagebox.showerror("Open Website", "Unable to open the website in your default browser.")
+        except Exception:
+            pass
+
+
+def open_wiki():
+    try:
+        webbrowser.open("https://github.com/Northy2410/PixelScript-Plus/wiki")
+    except Exception:
+        try:
+            messagebox.showerror("Open Wiki", "Unable to open the wiki in your default browser.")
+        except Exception:
+            pass
+
 def open_settings():
     settings_win = tk.Toplevel(root)
     settings_win.title("Settings")
-    settings_win.geometry("350x260")
+    settings_win.geometry("350x300")
     settings_win.resizable(False, False)
 
     theme_var = tk.StringVar(value=current_theme)
@@ -495,14 +533,17 @@ def open_settings():
     about_btn = tk.Button(main_frame, text="About", command=open_about, width=16)
     about_btn.grid(row=5, column=0, pady=(10, 0), sticky="w")
 
+    plugins_btn = tk.Button(main_frame, text="Installed Plugins", command=show_installed_plugins, width=16)
+    plugins_btn.grid(row=6, column=0, pady=(8, 0), sticky="w")
+
     style_window(settings_win, current_theme)
 
 menu_bar = tk.Menu(root)
 
 file_menu = tk.Menu(menu_bar, tearoff=0)
-file_menu.add_command(label="New", command=new_file)
-file_menu.add_command(label="Open", command=open_file)
-file_menu.add_command(label="Save", command=save_file)
+file_menu.add_command(label="New (Ctrl+N)", command=new_file)
+file_menu.add_command(label="Open (Ctrl+O)", command=open_file)
+file_menu.add_command(label="Save (Ctrl+S)", command=save_file)
 file_menu.add_separator()
 file_menu.add_command(label="Exit", command=on_closing)
 menu_bar.add_cascade(label="File", menu=file_menu)
@@ -536,6 +577,8 @@ settings_menu.add_command(label="Settings", command=open_settings)
 menu_bar.add_cascade(label="Settings", menu=settings_menu)
 
 help_menu = tk.Menu(menu_bar, tearoff=0)
+help_menu.add_command(label="Website", command=open_website)
+help_menu.add_command(label="Wiki", command=open_wiki)
 help_menu.add_command(label="Submit an issue or feature", command=open_help)
 menu_bar.add_cascade(label="Help", menu=help_menu)
 
@@ -543,5 +586,228 @@ root.config(menu=menu_bar)
 
 current_theme = load_settings()
 apply_theme(current_theme)
+
+
+# --- Plugin system -------------------------------------------------
+class PluginManager:
+    """Simple plugin manager that loads Python modules from a plugins folder.
+
+    Plugins should be single .py files and expose a `register(api)` function.
+    """
+    def __init__(self, plugins_dir, api):
+        self.plugins_dir = plugins_dir
+        self.api = api
+        self.plugins = []
+
+    def discover(self):
+        files = []
+        try:
+            for fname in os.listdir(self.plugins_dir):
+                if fname.endswith('.py') and not fname.startswith('_'):
+                    files.append(os.path.join(self.plugins_dir, fname))
+        except Exception as e:
+            print('Plugin discovery failed:', e)
+        return files
+
+    def load_plugins(self):
+        for path in self.discover():
+            name = os.path.splitext(os.path.basename(path))[0]
+            try:
+                spec = importlib.util.spec_from_file_location(f'pixelscript_plugin_{name}', path)
+                if spec is None or spec.loader is None:
+                    raise ImportError(f'Invalid spec for {path}')
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if hasattr(module, 'register') and callable(module.register):
+                    try:
+                        module.register(self.api)
+                        # collect metadata if provided by plugin
+                        plugin_name = getattr(module, 'PLUGIN_NAME', name)
+                        plugin_author = getattr(module, 'PLUGIN_AUTHOR', 'Unknown')
+                        plugin_version = getattr(module, 'PLUGIN_VERSION', '')
+                        info = {
+                            'module': module,
+                            'file': path,
+                            'id': name,
+                            'name': plugin_name,
+                            'author': plugin_author,
+                            'version': plugin_version,
+                        }
+                        self.plugins.append(info)
+                        print(f"Loaded plugin: {plugin_name} (id={name})")
+                    except Exception:
+                        traceback.print_exc()
+                        try:
+                            messagebox.showerror('Plugin Error', f"Plugin '{name}' raised an exception during register(). See console for details.")
+                        except Exception:
+                            pass
+                else:
+                    print(f"Skipping {name}: no register(api) function found")
+            except Exception:
+                traceback.print_exc()
+                try:
+                    messagebox.showerror('Plugin Load Error', f"Failed to load plugin '{name}'. See console for details.")
+                except Exception:
+                    pass
+
+
+# Small helper plugin API utilities
+def _add_menu(name):
+    m = tk.Menu(menu_bar, tearoff=0)
+    menu_bar.add_cascade(label=name, menu=m)
+    return m
+
+# Public API passed to plugins
+PLUGIN_API = {
+    'root': root,
+    'text_area': text_area,
+    'menu_bar': menu_bar,
+    'add_menu': _add_menu,
+    'resource_path': resource_path,
+    'open_file': open_file,
+    'save_file': save_file,
+    'show_message': lambda title, msg: messagebox.showinfo(title, msg),
+}
+
+
+def show_installed_plugins():
+    """Open a window listing installed plugins and their metadata."""
+    win = tk.Toplevel(root)
+    win.title("Installed Plugins")
+    win.geometry("420x350")
+    win.resizable(False, False)
+
+    frame = tk.Frame(win, padx=10, pady=10)
+    frame.pack(fill="both", expand=True)
+
+    listbox = tk.Listbox(frame, width=60, height=10)
+    listbox.pack(side="top", fill="both", expand=False)
+
+    note_label = tk.Label(frame, text="Note: Restart PixelScript to refresh and apply plugin changes.", fg="gray", anchor="w", justify="left", wraplength=380)
+    note_label.pack(side="top", pady=(6, 6), fill="x")
+
+    details = tk.Label(frame, text="Select a plugin to see details", anchor="w", justify="left", wraplength=380)
+    details.pack(side="top", pady=(8, 0), fill="x")
+
+    plugins = getattr(plugin_manager, 'plugins', [])
+    for idx, p in enumerate(plugins):
+        display = f"{p.get('name', p.get('id'))} — {p.get('author', 'Unknown')}"
+        listbox.insert(tk.END, display)
+
+    def on_select(evt):
+        sel = listbox.curselection()
+        if not sel:
+            return
+        i = sel[0]
+        p = plugins[i]
+        txt = f"Name: {p.get('name')}\nDeveloper: {p.get('author')}\nID: {p.get('id')}"
+        if p.get('version'):
+            txt += f"\nVersion: {p.get('version')}"
+        details.config(text=txt)
+
+    listbox.bind('<<ListboxSelect>>', on_select)
+
+    def uninstall_selected():
+        sel = listbox.curselection()
+        if not sel:
+            messagebox.showwarning('No Selection', 'Please select a plugin to uninstall.')
+            return
+        i = sel[0]
+        p = plugins[i]
+        name = p.get('name') or p.get('id')
+        if not messagebox.askyesno('Confirm Uninstall', f"Uninstall plugin '{name}'? This will delete the plugin file from the plugins folder."):
+            return
+        # Attempt to call unregister if provided
+        try:
+            module = p.get('module')
+            if module and hasattr(module, 'unregister') and callable(module.unregister):
+                try:
+                    module.unregister(PLUGIN_API)
+                except Exception:
+                    traceback.print_exc()
+        except Exception:
+            traceback.print_exc()
+
+        # Safely remove file only if it's inside plugins dir
+        path = p.get('file')
+        try:
+            abs_path = os.path.abspath(path)
+            abs_plugins = os.path.abspath(PLUGINS_DIR)
+            common = os.path.commonpath([abs_path, abs_plugins])
+            if common != abs_plugins:
+                raise PermissionError('Plugin file is outside the plugins directory; aborting delete.')
+            os.remove(abs_path)
+        except Exception as e:
+            traceback.print_exc()
+            try:
+                messagebox.showerror('Uninstall Failed', f"Could not remove plugin file: {e}")
+            except Exception:
+                pass
+            return
+
+        # Remove from internal list and UI
+        try:
+            del plugins[i]
+            listbox.delete(i)
+            details.config(text='Plugin uninstalled.')
+            messagebox.showinfo('Uninstalled', f"Plugin '{name}' was uninstalled. Please restart PixelScript to refresh and apply changes.")
+        except Exception:
+            traceback.print_exc()
+
+    uninstall_btn = tk.Button(frame, text="Uninstall", width=12, command=uninstall_selected)
+    uninstall_btn.pack(side="right", padx=(0,6), pady=8)
+
+    close_btn = tk.Button(frame, text="Close", width=12, command=win.destroy)
+    close_btn.pack(side="right", pady=8)
+
+    style_window(win, current_theme)
+
+PLUGINS_DIR = get_plugins_dir()
+plugin_manager = PluginManager(PLUGINS_DIR, PLUGIN_API)
+try:
+    plugin_manager.load_plugins()
+except Exception:
+    traceback.print_exc()
+
+# --------------------
+# Keyboard shortcuts
+# --------------------
+def _bind_shortcuts():
+    # Handlers accept an optional event arg from tkinter
+    def _save(event=None):
+        try:
+            save_file()
+        except Exception:
+            traceback.print_exc()
+        return "break"
+
+    def _open(event=None):
+        try:
+            open_file()
+        except Exception:
+            traceback.print_exc()
+        return "break"
+
+    def _new(event=None):
+        try:
+            new_file()
+        except Exception:
+            traceback.print_exc()
+        return "break"
+
+    # Bind for Control on Windows/Linux and Command on macOS where appropriate
+    root.bind_all('<Control-s>', _save)
+    root.bind_all('<Control-o>', _open)
+    root.bind_all('<Control-n>', _new)
+    try:
+        if platform.system() == 'Darwin':
+            root.bind_all('<Command-s>', _save)
+            root.bind_all('<Command-o>', _open)
+            root.bind_all('<Command-n>', _new)
+    except Exception:
+        pass
+
+
+_bind_shortcuts()
 
 root.mainloop()
