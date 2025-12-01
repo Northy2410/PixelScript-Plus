@@ -22,12 +22,6 @@ It gives you all the tools you need to write and edit plain text (`.txt`) files 
 
 ---
 
-## ⚠️ Important
-> [!IMPORTANT]  
-> Versions **1.2 and above** may require small, easy bug fixes on your computer.  
-> Check the [release notes](https://github.com/Leaf-Technologies/PixelScript-Plus/releases) for more information.
-
----
 
 <img width="750" height="563" alt="PixelScript+ Screenshot" src="https://github.com/user-attachments/assets/bb2acdf8-dbcc-4bc5-b09c-4d91b05f7406" />
 
