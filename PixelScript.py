@@ -61,7 +61,7 @@ update_line_counter()
 # Github info
 OWNER = "Northy2410"
 REPO = "PixelScript-Plus"
-CURRENT_VERSION = "1.5"
+CURRENT_VERSION = "1.6"
 
 # update check (manual invocation)
 def check_for_update(parent=None, silent=False):
@@ -71,24 +71,89 @@ def check_for_update(parent=None, silent=False):
         parent: optional window to associate dialogs with.
         silent (bool): if True suppress info/error dialogs when no update or failure.
     """
-    url = "https://api.github.com/repos/northy2410/pixelscript-plus/releases/latest"
+    # Load beta updates preference
+    check_beta = load_beta_updates_setting()
+    
+    if check_beta:
+        # Get all releases including pre-releases
+        url = "https://api.github.com/repos/northy2410/pixelscript-plus/releases"
+        try:
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            releases = response.json()
+            # Filter to get the latest release (including pre-releases)
+            if not releases:
+                raise Exception("No releases found")
+            latest_release = releases[0]  # GitHub returns releases sorted by date
+        except Exception as e:
+            if not silent:
+                fail_win = tk.Toplevel(root if parent is None else parent)
+                fail_win.title("Update Check Failed")
+                fail_win.geometry("360x160")
+                fail_win.resizable(False, False)
+                fail_win.attributes("-topmost", True)
+                msg = tk.Label(
+                    fail_win,
+                    text=f"Could not check for updates.\n\n{e}",
+                    font=("Arial", 12), justify="center"
+                )
+                msg.pack(pady=18)
+                btn = tk.Button(
+                    fail_win,
+                    text="OK",
+                    command=fail_win.destroy,
+                    font=("Arial", 11)
+                )
+                btn.pack(pady=5)
+                style_window(fail_win, current_theme)
+            return
+    else:
+        # Get only stable releases
+        url = "https://api.github.com/repos/northy2410/pixelscript-plus/releases/latest"
+        try:
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            latest_release = response.json()
+        except Exception as e:
+            if not silent:
+                fail_win = tk.Toplevel(root if parent is None else parent)
+                fail_win.title("Update Check Failed")
+                fail_win.geometry("360x160")
+                fail_win.resizable(False, False)
+                fail_win.attributes("-topmost", True)
+                msg = tk.Label(
+                    fail_win,
+                    text=f"Could not check for updates.\n\n{e}",
+                    font=("Arial", 12), justify="center"
+                )
+                msg.pack(pady=18)
+                btn = tk.Button(
+                    fail_win,
+                    text="OK",
+                    command=fail_win.destroy,
+                    font=("Arial", 11)
+                )
+                btn.pack(pady=5)
+                style_window(fail_win, current_theme)
+            return
+    
     try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        latest_release = response.json()
         latest_version = latest_release.get("tag_name", "").lstrip("vV")
+        is_prerelease = latest_release.get("prerelease", False)
         if latest_version and latest_version != CURRENT_VERSION:
             def open_release():
                 webbrowser.open(latest_release['html_url'])
                 update_win.destroy()
             update_win = tk.Toplevel(root if parent is None else parent)
             update_win.title("Update Available")
-            update_win.geometry("360x170")
+            update_win.geometry("360x190")
             update_win.resizable(False, False)
             update_win.attributes("-topmost", True)
+            
+            version_type = " (Beta)" if is_prerelease else ""
             msg = tk.Label(
                 update_win,
-                text=f"A new version is available!\n\nLatest: {latest_version}\nCurrent: {CURRENT_VERSION}",
+                text=f"A new version is available!\n\nLatest: {latest_version}{version_type}\nCurrent: {CURRENT_VERSION}",
                 font=("Arial", 12), justify="center"
             )
             msg.pack(pady=15)
@@ -144,6 +209,7 @@ def check_for_update(parent=None, silent=False):
             style_window(fail_win, current_theme)
 
 unsaved_changes = False
+current_file_path = None
 
 def on_text_modified(event=None):
     global unsaved_changes
@@ -162,29 +228,49 @@ def on_closing():
 root.protocol("WM_DELETE_WINDOW", on_closing)
 
 def new_file():
-    global unsaved_changes
+    global unsaved_changes, current_file_path
     text_area.delete(1.0, tk.END)
     unsaved_changes = False
+    current_file_path = None
+    root.title("PixelScript+")
     update_line_counter()
 
 def open_file():
-    global unsaved_changes
+    global unsaved_changes, current_file_path
     file = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
     if file:
         with open(file, "r", encoding="utf-8") as f:
             text_area.delete(1.0, tk.END)
             text_area.insert(tk.END, f.read())
         unsaved_changes = False
+        current_file_path = file
+        root.title(f"PixelScript+ - {os.path.basename(file)}")
         update_line_counter()
 
 def save_file():
-    global unsaved_changes
+    """Save to current file, or prompt for filename if no file is open."""
+    global unsaved_changes, current_file_path
+    if current_file_path:
+        # Save to existing file
+        with open(current_file_path, "w", encoding="utf-8") as f:
+            f.write(text_area.get(1.0, tk.END))
+        unsaved_changes = False
+        messagebox.showinfo("Saved", "File saved successfully!")
+    else:
+        # No file open, use Save As
+        save_as_file()
+
+def save_as_file():
+    """Always prompt for a new filename to save to."""
+    global unsaved_changes, current_file_path
     file = filedialog.asksaveasfilename(defaultextension=".txt",
                                         filetypes=[("Text Files", "*.txt")])
     if file:
         with open(file, "w", encoding="utf-8") as f:
             f.write(text_area.get(1.0, tk.END))
         unsaved_changes = False
+        current_file_path = file
+        root.title(f"PixelScript+ - {os.path.basename(file)}")
         messagebox.showinfo("Saved", "File saved successfully!")
 
 def set_font_family(family):
@@ -347,7 +433,7 @@ def get_settings_path():
 
 
 def get_plugins_dir():
-    """Return the plugins directory path and ensure it exists.
+    r"""Return the plugins directory path and ensure it exists.
 
     On Windows this will be: %APPDATA%\PixelScriptPlus\plugins
     On other systems: ~/.pixelscriptplus/plugins
@@ -370,9 +456,32 @@ def load_settings():
         return config.get("Appearance", "theme", fallback="light")
     return "light"
 
-def save_settings(theme):
+def load_beta_updates_setting():
+    """Load the beta updates preference from settings."""
     config = configparser.ConfigParser()
+    if os.path.exists(SETTINGS_FILE):
+        config.read(SETTINGS_FILE)
+        return config.getboolean("Updates", "check_beta", fallback=False)
+    return False
+
+def save_settings(theme, check_beta=None):
+    """Save settings to file.
+    
+    Parameters:
+        theme: The theme to save ("light" or "dark")
+        check_beta: If provided, save the beta updates preference
+    """
+    config = configparser.ConfigParser()
+    if os.path.exists(SETTINGS_FILE):
+        config.read(SETTINGS_FILE)
+    
     config["Appearance"] = {"theme": theme}
+    
+    if check_beta is not None:
+        if "Updates" not in config:
+            config["Updates"] = {}
+        config["Updates"]["check_beta"] = str(check_beta)
+    
     with open(SETTINGS_FILE, "w") as f:
         config.write(f)
 
@@ -394,62 +503,154 @@ def style_window(win, theme):
         fg = "#f8f8f2"
         entry_bg = "#2d323b"
         entry_fg = "#f8f8f2"
+        frame_bg = "#2d323b"
+        button_bg = "#3a3f4b"
+        button_fg = "#f8f8f2"
     else:
         bg = "SystemButtonFace"
         fg = "black"
         entry_bg = "white"
         entry_fg = "black"
+        frame_bg = "SystemButtonFace"
+        button_bg = "SystemButtonFace"
+        button_fg = "black"
+    
     win.config(bg=bg)
-    for widget in win.winfo_children():
+    
+    def apply_to_widget(widget):
         cls = widget.__class__.__name__
-        if cls in ("Frame", "LabelFrame"):
-            widget.config(bg=bg)
-            for child in widget.winfo_children():
-                if child.__class__.__name__ == "Label":
-                    child.config(bg=bg, fg=fg)
-                elif child.__class__.__name__ == "Button":
-                    child.config(bg=bg, fg=fg, activebackground=bg, activeforeground=fg)
-                elif child.__class__.__name__ == "Entry":
-                    child.config(bg=entry_bg, fg=entry_fg, insertbackground=entry_fg)
-                elif child.__class__.__name__ == "Radiobutton":
-                    child.config(bg=bg, fg=fg, selectcolor=bg, activebackground=bg, activeforeground=fg)
-        elif cls == "Label":
-            widget.config(bg=bg, fg=fg)
-        elif cls == "Button":
-            widget.config(bg=bg, fg=fg, activebackground=bg, activeforeground=fg)
-        elif cls == "Entry":
-            widget.config(bg=entry_bg, fg=entry_fg, insertbackground=entry_fg)
-        elif cls == "Radiobutton":
-            widget.config(bg=bg, fg=fg, selectcolor=bg, activebackground=bg, activeforeground=fg)
+        try:
+            if cls == "Frame":
+                widget.config(bg=bg)
+            elif cls == "LabelFrame":
+                widget.config(bg=bg, fg=fg)
+            elif cls == "Label":
+                widget.config(bg=bg, fg=fg)
+            elif cls == "Button":
+                widget.config(bg=button_bg, fg=button_fg, activebackground=button_bg, activeforeground=button_fg)
+            elif cls == "Entry":
+                widget.config(bg=entry_bg, fg=entry_fg, insertbackground=entry_fg)
+            elif cls == "Listbox":
+                # Dark theme list styling
+                if theme == "dark":
+                    widget.config(bg=entry_bg, fg=entry_fg,
+                                  selectbackground="#444b5c", selectforeground=entry_fg,
+                                  highlightthickness=1, highlightbackground="#3a3f4b",
+                                  activestyle="none")
+                else:
+                    widget.config(bg="white", fg="black",
+                                  selectbackground="#cce0ff", selectforeground="black",
+                                  highlightthickness=1, highlightbackground="#c0c0c0",
+                                  activestyle="dotbox")
+            elif cls == "Radiobutton":
+                widget.config(bg=bg, fg=fg, selectcolor=frame_bg, activebackground=bg, activeforeground=fg)
+            elif cls == "Checkbutton":
+                widget.config(bg=bg, fg=fg, selectcolor=frame_bg, activebackground=bg, activeforeground=fg)
+            elif cls == "Scrollbar":
+                # Basic scrollbar colors for dark/light
+                if theme == "dark":
+                    widget.config(bg=bg, activebackground=button_bg, troughcolor=frame_bg, highlightbackground=bg)
+                else:
+                    widget.config(bg=bg)
+        except:
+            pass
+        
+        # Recursively apply to children
+        for child in widget.winfo_children():
+            apply_to_widget(child)
+    
+    for widget in win.winfo_children():
+        apply_to_widget(widget)
 
 def open_about():
+    # About dialog with full-width logo banner and simplified content
     about_win = tk.Toplevel(root)
     about_win.title("About PixelScript+")
-    about_win.geometry("500x400")  # Increased window size
+    about_win.geometry("520x360")
     about_win.resizable(False, False)
 
-    logo_img = tk.PhotoImage(file=resource_path("Icon.png"))
-    logo_label = tk.Label(about_win, image=logo_img, bg=about_win.cget("bg"))
-    logo_label.image = logo_img  # keep a reference
-    logo_label.pack(pady=15)
+    # Banner across the top with centered logo
+    banner = tk.Frame(about_win, padx=0, pady=12)
+    banner.pack(fill="x")
 
-    info_text = (
-        "PixelScript+\n"
-        f"Version: {CURRENT_VERSION}\n"
+    img = None
+    try:
+        img = tk.PhotoImage(file=resource_path("logo.png"))
+    except Exception:
+        try:
+            img = tk.PhotoImage(file=resource_path("Icon.png"))
+        except Exception:
+            img = None
+
+    if img is not None:
+        # Keep banner slim and reasonably narrow
+        try:
+            max_w = 420
+            max_h = 60
+            factor_w = max(1, img.width() // max_w)
+            factor_h = max(1, img.height() // max_h)
+            factor = max(factor_w, factor_h)
+            if factor > 1:
+                img = img.subsample(factor, factor)
+        except Exception:
+            pass
+        banner_logo = tk.Label(banner, image=img)
+        banner_logo.image = img
+        banner_logo.pack(side="top")
+
+    # Body content (no product name, just version + details)
+    body = tk.Frame(about_win, padx=16, pady=8)
+    body.pack(fill="both", expand=True)
+
+    version_line = tk.Label(body, text=f"Version {CURRENT_VERSION}", font=("Arial", 11))
+    version_line.pack(anchor="w", pady=(4, 0))
+
+    try:
+        os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
+    except Exception:
+        os_info = platform.platform()
+
+    info_block = (
         "A simple, extendable text editor.\n"
-        "© 2025 Riley Northcote."
+        f"Running on: {os_info}\n"
+        "\n"
+        "© 2025 Riley Northcote. All rights reserved."
     )
-    info_label = tk.Label(about_win, text=info_text, font=("Arial", 14), justify="center")
-    info_label.pack(pady=8)
+    info_label = tk.Label(body, text=info_block, font=("Arial", 10), justify="left", anchor="w")
+    info_label.pack(anchor="w", pady=(8, 0))
 
-    license_text = "License: Proprietary"
-    license_label = tk.Label(about_win, text=license_text, font=("Arial", 12))
-    license_label.pack(pady=15)
+    # License link row
+    def open_license():
+        try:
+            webbrowser.open("https://github.com/Northy2410/PixelScript-Plus/blob/main/Licence")
+        except Exception:
+            pass
 
-    close_btn = tk.Button(about_win, text="Close", command=about_win.destroy)
-    close_btn.pack(pady=10)
+    link_color = "#4ea1ff" if current_theme == "dark" else "#0645AD"
+    lic_row = tk.Frame(body)
+    lic_row.pack(anchor="w", pady=(12, 0))
+    lic_prefix = tk.Label(lic_row, text="This product is licensed under the ", font=("Arial", 10))
+    lic_prefix.pack(side="left")
+    lic_link = tk.Label(lic_row, text="PixelScript License Terms", font=("Arial", 10, "underline"), fg=link_color, cursor="hand2")
+    lic_link.pack(side="left")
+    lic_link.bind("<Button-1>", lambda e: open_license())
+
+    # Bottom buttons (OK only)
+    bottom = tk.Frame(about_win, padx=16, pady=8)
+    bottom.pack(fill="x")
+    ok_btn = tk.Button(bottom, text="OK", width=12, command=about_win.destroy)
+    ok_btn.pack(side="right")
+
+    # Keyboard: Enter/Esc to close
+    about_win.bind("<Return>", lambda e: about_win.destroy())
+    about_win.bind("<Escape>", lambda e: about_win.destroy())
 
     style_window(about_win, current_theme)
+    # Re-apply link color after theming
+    try:
+        lic_link.config(fg=link_color)
+    except Exception:
+        pass
 
 def open_help():
     help_win = tk.Toplevel(root)
@@ -496,45 +697,123 @@ def open_wiki():
 
 def open_settings():
     settings_win = tk.Toplevel(root)
-    settings_win.title("Settings")
-    settings_win.geometry("350x300")
+    settings_win.title("Settings - PixelScript+")
+    settings_win.geometry("520x480")
     settings_win.resizable(False, False)
 
     theme_var = tk.StringVar(value=current_theme)
+    beta_var = tk.BooleanVar(value=load_beta_updates_setting())
 
-    main_frame = tk.Frame(settings_win, padx=20, pady=20)
+    # Header
+    header = tk.Frame(settings_win, height=60)
+    header.pack(fill="x")
+    header_label = tk.Label(header, text="⚙ Settings", font=("Arial", 18, "bold"))
+    header_label.pack(pady=15)
+
+    # Separator
+    separator1 = tk.Frame(settings_win, height=2, bd=1, relief="sunken")
+    separator1.pack(fill="x", padx=15, pady=5)
+
+    # Main scrollable frame
+    main_frame = tk.Frame(settings_win, padx=25, pady=10)
     main_frame.pack(fill="both", expand=True)
 
-    theme_label = tk.Label(main_frame, text="Theme:", font=("Arial", 12, "bold"))
-    theme_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
+    # Appearance Section
+    appearance_section = tk.LabelFrame(main_frame, text=" Appearance ", font=("Arial", 11, "bold"), 
+                                       padx=15, pady=12, relief="groove", bd=2)
+    appearance_section.pack(fill="x", pady=(5, 12))
 
-    theme_frame = tk.Frame(main_frame)
-    theme_frame.grid(row=1, column=0, sticky="w")
-    tk.Radiobutton(theme_frame, text="Light", variable=theme_var, value="light").pack(side="left", padx=5)
-    tk.Radiobutton(theme_frame, text="Dark", variable=theme_var, value="dark").pack(side="left", padx=5)
+    theme_label = tk.Label(appearance_section, text="Theme:", font=("Arial", 10))
+    theme_label.grid(row=0, column=0, sticky="w", pady=5)
 
-    future_label = tk.Label(main_frame, text="(More settings coming soon...)", font=("Arial", 10, "italic"), fg="gray")
-    future_label.grid(row=2, column=0, sticky="w", pady=(20, 0))
+    theme_frame = tk.Frame(appearance_section)
+    theme_frame.grid(row=1, column=0, sticky="w", padx=10)
+    
+    light_rb = tk.Radiobutton(theme_frame, text="☀ Light", variable=theme_var, value="light", 
+                              font=("Arial", 10), padx=8, pady=4)
+    light_rb.pack(side="left", padx=5)
+    
+    dark_rb = tk.Radiobutton(theme_frame, text="🌙 Dark", variable=theme_var, value="dark", 
+                             font=("Arial", 10), padx=8, pady=4)
+    dark_rb.pack(side="left", padx=5)
+
+    # Updates Section
+    updates_section = tk.LabelFrame(main_frame, text=" Updates ", font=("Arial", 11, "bold"),
+                                    padx=15, pady=12, relief="groove", bd=2)
+    updates_section.pack(fill="x", pady=(0, 12))
+    
+    beta_check = tk.Checkbutton(updates_section, text="Check for Beta/Pre-release versions", 
+                                variable=beta_var, font=("Arial", 10))
+    beta_check.grid(row=0, column=0, sticky="w", pady=5)
+    
+    beta_hint = tk.Label(updates_section, text="Enable to receive early access to new features", 
+                        font=("Arial", 9, "italic"), fg="gray")
+    beta_hint.grid(row=1, column=0, sticky="w", padx=20)
+
+    # Quick Actions Section
+    actions_section = tk.LabelFrame(main_frame, text=" Quick Actions ", font=("Arial", 11, "bold"),
+                                    padx=15, pady=12, relief="groove", bd=2)
+    actions_section.pack(fill="x", pady=(0, 12))
+
+    # Row 1: Check for Updates + Save Settings (side by side)
+    actions_row1 = tk.Frame(actions_section)
+    actions_row1.pack(fill="x")
+
+    def _save_only():
+        # Save and close the settings window
+        save_and_apply()
+
+    update_btn = tk.Button(actions_row1, text="🔄 Check for Updates",
+                           command=lambda: check_for_update(parent=settings_win),
+                           font=("Arial", 10), width=22, pady=5)
+    update_btn.grid(row=0, column=0, padx=5, pady=4, sticky="w")
+
+    quick_save_btn = tk.Button(actions_row1, text="💾 Save Settings",
+                               command=_save_only,
+                               font=("Arial", 10), width=22, pady=5)
+    quick_save_btn.grid(row=0, column=1, padx=5, pady=4, sticky="e")
+
+    # Row 2: Plugins + About (side by side)
+    actions_row2 = tk.Frame(actions_section)
+    actions_row2.pack(fill="x")
+
+    plugins_btn = tk.Button(actions_row2, text="🔌 Installed Plugins",
+                            command=show_installed_plugins,
+                            font=("Arial", 10), width=22, pady=5)
+    plugins_btn.grid(row=0, column=0, padx=5, pady=4, sticky="w")
+
+    about_btn = tk.Button(actions_row2, text="ℹ About", command=open_about,
+                          font=("Arial", 10), width=22, pady=5)
+    about_btn.grid(row=0, column=1, padx=5, pady=4, sticky="e")
+
+    # Status line
+    status_var = tk.StringVar(value="")
+    status_lbl = tk.Label(actions_section, textvariable=status_var, font=("Arial", 9, "italic"))
+    status_lbl.pack(anchor="w", padx=6, pady=(2, 0))
+
+    # Bottom Separator
+    separator2 = tk.Frame(settings_win, height=2, bd=1, relief="sunken")
+    separator2.pack(fill="x", padx=15, pady=5)
+
+    # Bottom buttons
+    button_frame = tk.Frame(settings_win, pady=10)
+    button_frame.pack(fill="x", padx=25)
 
     def save_and_apply():
         global current_theme
         current_theme = theme_var.get()
-        save_settings(current_theme)
+        save_settings(current_theme, beta_var.get())
         apply_theme(current_theme)
         settings_win.destroy()
 
+    cancel_btn = tk.Button(button_frame, text="Cancel", command=settings_win.destroy, 
+                          font=("Arial", 10, "bold"), width=15, pady=6)
+    cancel_btn.pack(side="right", padx=5)
 
-    save_btn = tk.Button(main_frame, text="Save", command=save_and_apply, width=16)
-    save_btn.grid(row=3, column=0, pady=(15, 0), sticky="w")
-
-    update_btn = tk.Button(main_frame, text="Check for Updates", command=lambda: check_for_update(parent=settings_win), width=16)
-    update_btn.grid(row=4, column=0, pady=(8, 0), sticky="w")
-
-    about_btn = tk.Button(main_frame, text="About", command=open_about, width=16)
-    about_btn.grid(row=5, column=0, pady=(10, 0), sticky="w")
-
-    plugins_btn = tk.Button(main_frame, text="Installed Plugins", command=show_installed_plugins, width=16)
-    plugins_btn.grid(row=6, column=0, pady=(8, 0), sticky="w")
+    save_btn = tk.Button(button_frame, text="💾 Save & Apply", command=save_and_apply, 
+                        font=("Arial", 10, "bold"), width=15, pady=6, 
+                        relief="solid", bd=2)
+    save_btn.pack(side="right", padx=5)
 
     style_window(settings_win, current_theme)
 
@@ -544,6 +823,7 @@ file_menu = tk.Menu(menu_bar, tearoff=0)
 file_menu.add_command(label="New (Ctrl+N)", command=new_file)
 file_menu.add_command(label="Open (Ctrl+O)", command=open_file)
 file_menu.add_command(label="Save (Ctrl+S)", command=save_file)
+file_menu.add_command(label="Save As (Ctrl+Shift+S)", command=save_as_file)
 file_menu.add_separator()
 file_menu.add_command(label="Exit", command=on_closing)
 menu_bar.add_cascade(label="File", menu=file_menu)
@@ -666,6 +946,7 @@ PLUGIN_API = {
     'resource_path': resource_path,
     'open_file': open_file,
     'save_file': save_file,
+    'save_as_file': save_as_file,
     'show_message': lambda title, msg: messagebox.showinfo(title, msg),
 }
 
@@ -781,6 +1062,13 @@ def _bind_shortcuts():
             traceback.print_exc()
         return "break"
 
+    def _save_as(event=None):
+        try:
+            save_as_file()
+        except Exception:
+            traceback.print_exc()
+        return "break"
+
     def _open(event=None):
         try:
             open_file()
@@ -797,11 +1085,13 @@ def _bind_shortcuts():
 
     # Bind for Control on Windows/Linux and Command on macOS where appropriate
     root.bind_all('<Control-s>', _save)
+    root.bind_all('<Control-Shift-S>', _save_as)
     root.bind_all('<Control-o>', _open)
     root.bind_all('<Control-n>', _new)
     try:
         if platform.system() == 'Darwin':
             root.bind_all('<Command-s>', _save)
+            root.bind_all('<Command-Shift-S>', _save_as)
             root.bind_all('<Command-o>', _open)
             root.bind_all('<Command-n>', _new)
     except Exception:
