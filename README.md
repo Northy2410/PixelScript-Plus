@@ -1,6 +1,6 @@
-# PixelScript+
+<img width="1280" height="256" alt="logo" src="https://github.com/user-attachments/assets/6ed69545-f06a-48b3-a93b-98ee0f10489a" />
 
-<img width="128" height="128" alt="PixelScript+ Icon" src="https://github.com/user-attachments/assets/ade0fd3b-35c8-460e-a7fa-97ec9c34b043" />
+---
 
 **PixelScript+** is a free, lightweight text editor built for simplicity and speed.  
 It gives you all the tools you need to write and edit plain text (`.txt`) files as efficiently and productively as possible.
