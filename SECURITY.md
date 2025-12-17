@@ -6,11 +6,12 @@ The current supported versions of PixelScript+ are:
 
 | Version | Supported          |
 | ------- | ------------------ |
+| 1.6     | :white_check_mark: |
 | 1.5     | :white_check_mark: |
 | 1.4     | :white_check_mark: |
-| 1.3.2   | :white_check_mark: |
-| 1.3.1   | :white_check_mark: |
-| 1.3     | :white_check_mark: |
+| 1.3.2   | :x:                |
+| 1.3.1   | :x:                |
+| 1.3     | :x:                |
 | 1.2     | :x:                |
 | 1.1     | :x:                |
 | 1.0     | :x:                |
