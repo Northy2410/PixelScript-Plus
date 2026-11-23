@@ -32,10 +32,5 @@ Please **read the license** before using this software.
 
 ---
 
-## Website
-pixelscriptplus.co.uk
-
----
-
 ### Developed by [Riley Northcote](https://github.com/Northy2410)  
 Simple. Fast. Reliable.
