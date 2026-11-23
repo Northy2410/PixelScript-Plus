@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, font
+from tkinter import filedialog, messagebox, font, simpledialog
 import sys
 import os
 import requests
@@ -10,6 +10,16 @@ import configparser
 import platform
 import importlib.util
 import traceback
+import struct
+import zlib
+
+try:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.exceptions import InvalidTag
+except ImportError:
+    hashes = AESGCM = PBKDF2HMAC = InvalidTag = None
 
 def resource_path(relative_path):
     try:
@@ -61,7 +71,7 @@ update_line_counter()
 # Github info
 OWNER = "Northy2410"
 REPO = "PixelScript-Plus"
-CURRENT_VERSION = "1.6"
+CURRENT_VERSION = "1.7"
 
 # update check (manual invocation)
 def check_for_update(parent=None, silent=False):
@@ -210,6 +220,16 @@ def check_for_update(parent=None, silent=False):
 
 unsaved_changes = False
 current_file_path = None
+current_ntsi_password = None
+current_ntsi_compressed = False
+
+NTSI_MAGIC = bytes.fromhex("A70E19C4")
+NTSI_VERSION = 2
+NTSI_HEADER_SIZE = 58
+NTSI_FLAG_COMPRESSED = 0x0001
+NTSI_PBKDF2_ITERATIONS = 300_000
+NTSI_HEADER = struct.Struct("<4sHHH16s12sQQI")
+MAX_NTSI_TEXT_BYTES = 64 * 1024 * 1024
 
 def on_text_modified(event=None):
     global unsaved_changes
@@ -219,29 +239,184 @@ def on_text_modified(event=None):
 text_area.bind("<<Modified>>", on_text_modified)
 
 def on_closing():
+    global current_ntsi_password
     if unsaved_changes:
         if messagebox.askyesno("Unsaved Changes", "You have unsaved changes. Do you want to exit without saving?"):
+            current_ntsi_password = None
             root.destroy()
     else:
+        current_ntsi_password = None
         root.destroy()
 
 root.protocol("WM_DELETE_WINDOW", on_closing)
 
 def new_file():
-    global unsaved_changes, current_file_path
+    global unsaved_changes, current_file_path, current_ntsi_password, current_ntsi_compressed
     text_area.delete(1.0, tk.END)
     unsaved_changes = False
     current_file_path = None
+    current_ntsi_password = None
+    current_ntsi_compressed = False
     root.title("PixelScript+")
     update_line_counter()
 
+def require_ntsi_support():
+    if AESGCM is None:
+        messagebox.showerror(
+            "NTSI Support Unavailable",
+            "The cryptography package is required to open and save .NTSI files.",
+        )
+        return False
+    return True
+
+def derive_ntsi_key(password, salt):
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=NTSI_PBKDF2_ITERATIONS,
+    )
+    return kdf.derive(password.encode("utf-8"))
+
+def inspect_ntsi(data):
+    if len(data) < NTSI_HEADER_SIZE:
+        raise ValueError("File is too small to contain an NTSI header")
+
+    magic, version, header_size, flags, salt, nonce, text_bytes, stored_bytes, crc32 = (
+        NTSI_HEADER.unpack(data[:NTSI_HEADER_SIZE])
+    )
+    if magic != NTSI_MAGIC:
+        raise ValueError("Invalid NTSI magic")
+    if version != NTSI_VERSION:
+        raise ValueError("Unsupported NTSI version")
+    if header_size != NTSI_HEADER_SIZE:
+        raise ValueError("Invalid NTSI header size")
+    if flags & ~NTSI_FLAG_COMPRESSED:
+        raise ValueError("Unknown NTSI flags")
+    if text_bytes > MAX_NTSI_TEXT_BYTES or stored_bytes > MAX_NTSI_TEXT_BYTES:
+        raise ValueError("NTSI file exceeds the supported size limit")
+    if len(data) - NTSI_HEADER_SIZE != stored_bytes:
+        raise ValueError("Stored payload size does not match the NTSI header")
+
+    return {
+        "compressed": bool(flags & NTSI_FLAG_COMPRESSED),
+        "text_bytes": text_bytes,
+        "stored_bytes": stored_bytes,
+        "crc32": crc32,
+        "salt": salt,
+        "nonce": nonce,
+    }
+
+def decode_ntsi(data, password):
+    info = inspect_ntsi(data)
+    try:
+        payload = AESGCM(derive_ntsi_key(password, info["salt"])).decrypt(
+            info["nonce"],
+            data[NTSI_HEADER_SIZE:],
+            data[:NTSI_HEADER_SIZE],
+        )
+    except InvalidTag as exc:
+        raise ValueError("Wrong password or corrupted NTSI file") from exc
+
+    if info["compressed"]:
+        payload = zlib.decompress(payload)
+
+    if len(payload) != info["text_bytes"]:
+        raise ValueError("Text size does not match the NTSI header")
+    if zlib.crc32(payload) & 0xFFFFFFFF != info["crc32"]:
+        raise ValueError("CRC32 checksum failed")
+
+    return payload.decode("utf-8")
+
+def encode_ntsi(text, password, compress=False):
+    if not password:
+        raise ValueError("A non-empty password is required")
+
+    text_bytes = text.encode("utf-8")
+    if len(text_bytes) > MAX_NTSI_TEXT_BYTES:
+        raise ValueError("Text exceeds the supported NTSI size limit")
+
+    payload = zlib.compress(text_bytes) if compress else text_bytes
+    if len(payload) > MAX_NTSI_TEXT_BYTES:
+        raise ValueError("Encrypted payload exceeds the supported size limit")
+
+    salt = os.urandom(16)
+    nonce = os.urandom(12)
+    header = NTSI_HEADER.pack(
+        NTSI_MAGIC,
+        NTSI_VERSION,
+        NTSI_HEADER_SIZE,
+        NTSI_FLAG_COMPRESSED if compress else 0,
+        salt,
+        nonce,
+        len(text_bytes),
+        len(payload) + 16,
+        zlib.crc32(text_bytes) & 0xFFFFFFFF,
+    )
+    ciphertext = AESGCM(derive_ntsi_key(password, salt)).encrypt(nonce, payload, header)
+    return header + ciphertext
+
+def ask_ntsi_password(confirm=False):
+    password = simpledialog.askstring(
+        "NTSI Password",
+        "Enter the NTSI password:",
+        parent=root,
+        show="*",
+    )
+    if password is None:
+        return None
+    if not password:
+        messagebox.showerror("Invalid Password", "A non-empty password is required.")
+        return None
+    if confirm:
+        confirmation = simpledialog.askstring(
+            "Confirm Password",
+            "Confirm the NTSI password:",
+            parent=root,
+            show="*",
+        )
+        if confirmation is None:
+            return None
+        if password != confirmation:
+            messagebox.showerror("Password Mismatch", "The passwords do not match.")
+            return None
+    return password
+
 def open_file():
-    global unsaved_changes, current_file_path
-    file = filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
+    global unsaved_changes, current_file_path, current_ntsi_password, current_ntsi_compressed
+    file = filedialog.askopenfilename(
+        filetypes=[
+            ("Supported Files", "*.txt *.NTSI"),
+            ("Text Files", "*.txt"),
+            ("NorthTech S.I.A.V.A. Memory File", "*.NTSI"),
+        ]
+    )
     if file:
-        with open(file, "r", encoding="utf-8") as f:
+        try:
+            if os.path.splitext(file)[1].lower() == ".ntsi":
+                if not require_ntsi_support():
+                    return
+                password = ask_ntsi_password()
+                if password is None:
+                    return
+                with open(file, "rb") as f:
+                    data = f.read()
+                text = decode_ntsi(data, password)
+                info = inspect_ntsi(data)
+                current_ntsi_password = password
+                current_ntsi_compressed = info["compressed"]
+            else:
+                with open(file, "r", encoding="utf-8") as f:
+                    text = f.read()
+                current_ntsi_password = None
+                current_ntsi_compressed = False
+
             text_area.delete(1.0, tk.END)
-            text_area.insert(tk.END, f.read())
+            text_area.insert(tk.END, text)
+            text_area.edit_modified(False)
+        except (OSError, UnicodeDecodeError, UnicodeEncodeError, ValueError, zlib.error) as exc:
+            messagebox.showerror("Unable to Open File", str(exc))
+            return
         unsaved_changes = False
         current_file_path = file
         root.title(f"PixelScript+ - {os.path.basename(file)}")
@@ -249,11 +424,29 @@ def open_file():
 
 def save_file():
     """Save to current file, or prompt for filename if no file is open."""
-    global unsaved_changes, current_file_path
+    global unsaved_changes, current_file_path, current_ntsi_password
     if current_file_path:
-        # Save to existing file
-        with open(current_file_path, "w", encoding="utf-8") as f:
-            f.write(text_area.get(1.0, tk.END))
+        try:
+            if os.path.splitext(current_file_path)[1].lower() == ".ntsi":
+                if not require_ntsi_support():
+                    return
+                if current_ntsi_password is None:
+                    current_ntsi_password = ask_ntsi_password(confirm=True)
+                    if current_ntsi_password is None:
+                        return
+                data = encode_ntsi(
+                    text_area.get("1.0", "end-1c"),
+                    current_ntsi_password,
+                    compress=current_ntsi_compressed,
+                )
+                with open(current_file_path, "wb") as f:
+                    f.write(data)
+            else:
+                with open(current_file_path, "w", encoding="utf-8", newline="") as f:
+                    f.write(text_area.get("1.0", "end-1c"))
+        except (OSError, UnicodeDecodeError, UnicodeEncodeError, ValueError, zlib.error) as exc:
+            messagebox.showerror("Unable to Save File", str(exc))
+            return
         unsaved_changes = False
         messagebox.showinfo("Saved", "File saved successfully!")
     else:
@@ -262,12 +455,43 @@ def save_file():
 
 def save_as_file():
     """Always prompt for a new filename to save to."""
-    global unsaved_changes, current_file_path
-    file = filedialog.asksaveasfilename(defaultextension=".txt",
-                                        filetypes=[("Text Files", "*.txt")])
+    global unsaved_changes, current_file_path, current_ntsi_password, current_ntsi_compressed
+    file = filedialog.asksaveasfilename(
+        defaultextension=".txt",
+        filetypes=[
+            ("Text Files", "*.txt"),
+            ("NorthTech S.I.A.V.A. Memory File", "*.NTSI"),
+        ],
+    )
     if file:
-        with open(file, "w", encoding="utf-8") as f:
-            f.write(text_area.get(1.0, tk.END))
+        try:
+            if os.path.splitext(file)[1].lower() == ".ntsi":
+                if not require_ntsi_support():
+                    return
+                password = ask_ntsi_password(confirm=True)
+                if password is None:
+                    return
+                compress = messagebox.askyesno(
+                    "Compress NTSI File",
+                    "Compress the text before encrypting?",
+                )
+                data = encode_ntsi(
+                    text_area.get("1.0", "end-1c"),
+                    password,
+                    compress=compress,
+                )
+                with open(file, "wb") as f:
+                    f.write(data)
+                current_ntsi_password = password
+                current_ntsi_compressed = compress
+            else:
+                with open(file, "w", encoding="utf-8", newline="") as f:
+                    f.write(text_area.get("1.0", "end-1c"))
+                current_ntsi_password = None
+                current_ntsi_compressed = False
+        except (OSError, UnicodeDecodeError, UnicodeEncodeError, ValueError, zlib.error) as exc:
+            messagebox.showerror("Unable to Save File", str(exc))
+            return
         unsaved_changes = False
         current_file_path = file
         root.title(f"PixelScript+ - {os.path.basename(file)}")
@@ -614,7 +838,7 @@ def open_about():
         "A simple, extendable text editor.\n"
         f"Running on: {os_info}\n"
         "\n"
-        "© 2025 Riley Northcote. All rights reserved."
+        "© 2026 Riley Northcote. All rights reserved."
     )
     info_label = tk.Label(body, text=info_block, font=("Arial", 10), justify="left", anchor="w")
     info_label.pack(anchor="w", pady=(8, 0))
@@ -674,16 +898,6 @@ def open_help():
     close_btn.pack(pady=4)
 
     style_window(help_win, current_theme)
-
-
-def open_website():
-    try:
-        webbrowser.open("https://pixelscriptplus.co.uk")
-    except Exception:
-        try:
-            messagebox.showerror("Open Website", "Unable to open the website in your default browser.")
-        except Exception:
-            pass
 
 
 def open_wiki():
@@ -857,7 +1071,6 @@ settings_menu.add_command(label="Settings", command=open_settings)
 menu_bar.add_cascade(label="Settings", menu=settings_menu)
 
 help_menu = tk.Menu(menu_bar, tearoff=0)
-help_menu.add_command(label="Website", command=open_website)
 help_menu.add_command(label="Wiki", command=open_wiki)
 help_menu.add_command(label="Submit an issue or feature", command=open_help)
 menu_bar.add_cascade(label="Help", menu=help_menu)
