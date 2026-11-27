@@ -17,8 +17,8 @@ It gives you all the tools you need to write and edit plain text (`.txt`) files 
 
 ## 💻 Compatibility
 - Windows
-- MacOS
-- Linux
+- MacOS (v2.0 and up)
+- Linux (v2.0 and up)
 
 ---
 
