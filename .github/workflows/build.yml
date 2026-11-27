@@ -4,8 +4,24 @@ name: Build PixelScript+ (Windows, Mac, Linux)
 on:
   workflow_dispatch:
 
+# The graph:
+#
+#            build (Windows / Mac / Linux)
+#                  |
+#         +--------+--------+
+#         |                 |
+#     installers          zips
+#         |                 |
+#         +--------+--------+
+#                  |
+#          package (App folder)
+
 jobs:
+  # ------------------------------------------------------------------
+  # 1. BUILD the app on each OS
+  # ------------------------------------------------------------------
   build:
+    name: Build app (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
@@ -39,34 +55,32 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests cryptography pillow pyinstaller
 
-      # Your assets live in an assets/ folder on GitHub, but the app and installer
-      # expect them next to the code with specific names (Icon.png, logo.png, etc).
-      # This finds them wherever they are (ignoring upper/lower case) and copies them.
+      # The app expects Icon.png and logo.png next to the code. Yours may be in an
+      # assets/ folder with different capitalisation, so find them and copy them.
       - name: Put assets where the app expects them
         shell: bash
         run: |
+          LABEL="${{ matrix.label }}"
+          echo "=== Files in your repo ==="
+          find . -type f -not -path "./.git/*" | sort
+          echo "=========================="
           find_file() {
             find . -type f -iname "$1" -not -path "./.git/*" -not -path "./dist/*" -not -path "./build/*" | head -n1
           }
+          # place <name to look for> <name to copy to> <required on: all | windows>
           place() {
             src="$(find_file "$1")"
-            if [ -z "$src" ]; then echo "ERROR: could not find $1 in the repo"; exit 1; fi
+            if [ -z "$src" ]; then
+              if [ "$3" = "all" ] || [ "$3" = "$LABEL" ]; then
+                echo "ERROR: could not find '$1' anywhere in the repo"; exit 1
+              fi
+              echo "WARNING: '$1' not found (not needed for this build)"; return 0
+            fi
             if [ "$src" -ef "$2" ]; then echo "$2 already in place"; else cp -f "$src" "$2"; echo "Copied $src -> $2"; fi
           }
-          place icon.png Icon.png
-          place logo.png logo.png
-          place icon.ico Icon.ico
-          if [ -n "$(find_file Licence.txt)" ]; then place Licence.txt Licence.txt; else place Licence Licence.txt; fi
-          # The installer wants a .bmp banner; convert from the jpg
-          python - <<'EOF'
-          import glob, os
-          from PIL import Image
-          paths = [p for p in glob.glob("**/*", recursive=True) if os.path.basename(p).lower() == "inslogo.jpg"]
-          if not paths:
-              raise SystemExit("ERROR: could not find inslogo.jpg in the repo")
-          Image.open(paths[0]).convert("RGB").save("inslogo.bmp")
-          print("Created inslogo.bmp")
-          EOF
+          place icon.png Icon.png all
+          place logo.png logo.png all
+          place icon.ico Icon.ico windows
 
       - name: Build app with PyInstaller
         shell: bash
@@ -78,42 +92,231 @@ jobs:
             --add-data "logo.png${{ matrix.data_sep }}." \
             PixelScript.py
 
-      # ---------- Windows: make the installer ----------
+      # Packed into a .tar so file permissions survive being passed between jobs
+      - name: Pack the built app
+        shell: bash
+        run: tar -cf raw.tar dist
+
+      - name: Save built app for the next jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-${{ matrix.label }}
+          path: raw.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 2a. INSTALLERS (runs at the same time as zips)
+  # ------------------------------------------------------------------
+  installers:
+    name: Make installer (${{ matrix.label }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+          - os: macos-latest
+            label: mac
+          - os: ubuntu-latest
+            label: linux
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Get your code
+        uses: actions/checkout@v4
+
+      - name: Download the built app
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-${{ matrix.label }}
+          path: raw
+
+      - name: Unpack the built app
+        shell: bash
+        run: tar -xf raw/raw.tar
+
+      - name: Put installer assets in place
+        shell: bash
+        run: |
+          LABEL="${{ matrix.label }}"
+          find_file() {
+            find . -type f -iname "$1" -not -path "./.git/*" -not -path "./dist/*" -not -path "./build/*" -not -path "./raw/*" | head -n1
+          }
+          place() {
+            src="$(find_file "$1")"
+            if [ -z "$src" ]; then
+              if [ "$3" = "$LABEL" ]; then echo "ERROR: could not find '$1' anywhere in the repo"; exit 1; fi
+              echo "WARNING: '$1' not found (not needed here)"; return 0
+            fi
+            if [ "$src" -ef "$2" ]; then echo "$2 already in place"; else cp -f "$src" "$2"; echo "Copied $src -> $2"; fi
+          }
+          place icon.png Icon.png linux
+          place icon.ico Icon.ico windows
+          if [ -n "$(find_file Licence.txt)" ]; then place Licence.txt Licence.txt windows; else place Licence Licence.txt windows; fi
+
+      # ---------- Windows: NSIS installer from your installer.nsi ----------
       - name: Build Windows installer
         if: matrix.label == 'windows'
         shell: bash
         run: |
           choco install nsis -y --no-progress
+          # inslogo isn't used, so drop that line (only on the build machine)
+          sed -i '/inslogo/d' installer.nsi
           "/c/Program Files (x86)/NSIS/makensis.exe" installer.nsi
+          mkdir installer_out
+          cp "PixelScript+ Setup.exe" installer_out/
 
-      - name: Collect Windows files
-        if: matrix.label == 'windows'
-        shell: bash
-        run: |
-          mkdir out
-          cp dist/PixelScript.exe out/
-          cp "PixelScript+ Setup.exe" out/
-
-      # ---------- Mac: zip the .app so it keeps working ----------
-      - name: Collect Mac files
+      # ---------- Mac: .dmg with an Applications shortcut ----------
+      - name: Build Mac installer (.dmg)
         if: matrix.label == 'mac'
         shell: bash
         run: |
-          mkdir out
-          ditto -c -k --keepParent dist/PixelScript.app out/PixelScript-mac.zip
+          mkdir -p dmg_staging installer_out
+          cp -R dist/PixelScript.app dmg_staging/
+          ln -s /Applications dmg_staging/Applications
+          hdiutil create -volname "PixelScript+" -srcfolder dmg_staging -ov -format UDZO "installer_out/PixelScript+ Installer.dmg"
 
-      # ---------- Linux: tar.gz keeps the "executable" permission ----------
-      - name: Collect Linux files
+      # ---------- Linux: .deb package ----------
+      - name: Build Linux installer (.deb)
         if: matrix.label == 'linux'
         shell: bash
         run: |
-          mkdir out
-          chmod +x dist/PixelScript
-          tar -czf out/PixelScript-linux.tar.gz -C dist PixelScript
+          VERSION="$(grep -m1 'CURRENT_VERSION' PixelScript.py | cut -d'"' -f2)"
+          VERSION="${VERSION:-1.0}"
+          PKG=pixelscript-plus
+          ROOT="deb/${PKG}_${VERSION}"
+          mkdir -p "$ROOT/DEBIAN" "$ROOT/opt/pixelscript-plus" "$ROOT/usr/bin" \
+                   "$ROOT/usr/share/applications" "$ROOT/usr/share/pixmaps"
+          cp dist/PixelScript "$ROOT/opt/pixelscript-plus/PixelScript"
+          chmod 755 "$ROOT/opt/pixelscript-plus/PixelScript"
+          ln -s /opt/pixelscript-plus/PixelScript "$ROOT/usr/bin/pixelscript-plus"
+          cp Icon.png "$ROOT/usr/share/pixmaps/pixelscript-plus.png"
+          cat > "$ROOT/usr/share/applications/pixelscript-plus.desktop" <<DESKTOP
+          [Desktop Entry]
+          Name=PixelScript+
+          Exec=/opt/pixelscript-plus/PixelScript
+          Icon=pixelscript-plus
+          Type=Application
+          Categories=Utility;TextEditor;
+          Terminal=false
+          DESKTOP
+          sed -i 's/^ *//' "$ROOT/usr/share/applications/pixelscript-plus.desktop"
+          cat > "$ROOT/DEBIAN/control" <<CONTROL
+          Package: ${PKG}
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Northy2410
+          Description: PixelScript+ text editor
+          CONTROL
+          sed -i 's/^ *//' "$ROOT/DEBIAN/control"
+          mkdir installer_out
+          dpkg-deb --build "$ROOT" "installer_out/PixelScript+_${VERSION}_amd64.deb"
 
-      - name: Upload build
+      - name: Save installer
         uses: actions/upload-artifact@v4
         with:
-          name: PixelScript-${{ matrix.label }}
+          name: installer-${{ matrix.label }}
+          path: installer_out/
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 2b. ZIPS (runs at the same time as installers)
+  # ------------------------------------------------------------------
+  zips:
+    name: Zip the apps
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-windows
+          path: raw/windows
+
+      - name: Download Mac build
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-mac
+          path: raw/mac
+
+      - name: Download Linux build
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-linux
+          path: raw/linux
+
+      - name: Create the zip files
+        shell: bash
+        run: |
+          W="$GITHUB_WORKSPACE"
+          for os in windows mac linux; do
+            mkdir -p "$W/unpacked/$os" "$W/zips/$os"
+            tar -xf "$W/raw/$os/raw.tar" -C "$W/unpacked/$os"
+          done
+          (cd "$W/unpacked/windows/dist" && zip -r "$W/zips/windows/PixelScript-windows.zip" PixelScript.exe)
+          (cd "$W/unpacked/mac/dist"     && zip -ry "$W/zips/mac/PixelScript-mac.zip" PixelScript.app)
+          (cd "$W/unpacked/linux/dist"   && zip -r "$W/zips/linux/PixelScript-linux.zip" PixelScript)
+
+      - name: Save zips
+        uses: actions/upload-artifact@v4
+        with:
+          name: zips
+          path: zips/
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # 3. PACKAGE everything into one "App" folder
+  # ------------------------------------------------------------------
+  package:
+    name: Put everything in the App folder
+    needs: [installers, zips]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-windows
+          path: installers/windows
+
+      - name: Download Mac installer
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-mac
+          path: installers/mac
+
+      - name: Download Linux installer
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-linux
+          path: installers/linux
+
+      - name: Download zips
+        uses: actions/download-artifact@v4
+        with:
+          name: zips
+          path: zips
+
+      - name: Build the App folder
+        shell: bash
+        run: |
+          mkdir -p out/App/Windows out/App/Mac out/App/Linux
+          cp installers/windows/* zips/windows/* out/App/Windows/
+          cp installers/mac/*     zips/mac/*     out/App/Mac/
+          cp installers/linux/*   zips/linux/*   out/App/Linux/
+          echo "=== Final layout ==="
+          find out -type f | sort
+
+      - name: Upload App folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: App
           path: out/
           if-no-files-found: error
