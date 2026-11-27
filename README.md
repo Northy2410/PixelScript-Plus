@@ -16,9 +16,9 @@ It gives you all the tools you need to write and edit plain text (`.txt`) files 
 ---
 
 ## 💻 Compatibility
-> [!NOTE]  
-> PixelScript+ currently works **only on Windows**.  
-> macOS and Linux versions are in active development so everyone can enjoy a fast, simple writing experience.
+- Windows
+- MacOS
+- Linux
 
 ---
 
