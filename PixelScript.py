@@ -1,10 +1,14 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, font, simpledialog
+from tkinter import filedialog, messagebox, font, simpledialog, ttk
 import sys
 import os
 import requests
 import webbrowser
 import calendar
+import json
+import re
+import subprocess
+import uuid
 from datetime import datetime
 import configparser
 import platform
@@ -12,6 +16,8 @@ import importlib.util
 import traceback
 import struct
 import zlib
+from html.parser import HTMLParser
+from pixelscript_markdown import export_pdf, extract_headings, markdown_to_html
 
 try:
     from cryptography.hazmat.primitives import hashes
@@ -37,191 +43,140 @@ if preferred_family not in available_fonts:
 current_font = font.Font(root=root, family=preferred_family, size=12)
 
 root.title("PixelScript+")
-root.geometry("600x400")
+root.geometry("900x600")
 root.iconphoto(True, tk.PhotoImage(file=resource_path("Icon.png")))
 
-text_frame = tk.Frame(root)
-text_frame.pack(fill="both", expand=True)
-
-line_counter = tk.Text(
-    text_frame, width=4, padx=4, takefocus=0, border=0,
-    background="#f0f0f0", foreground="gray", state="disabled", font=current_font
-)
-line_counter.pack(side="left", fill="y")
-
-text_area = tk.Text(text_frame, wrap="word", undo=True, font=current_font)
-text_area.pack(side="left", fill="both", expand=True)
+workspace = tk.PanedWindow(root, orient="horizontal", sashwidth=5, sashrelief="raised")
+workspace.pack(fill="both", expand=True)
+editor_notebook = ttk.Notebook(workspace)
+workspace.add(editor_notebook)
+documents = {}
+document_frames = {}
+text_area = None
+line_counter = None
+current_file_path = None
+current_ntsi_password = None
+current_ntsi_compressed = False
+unsaved_changes = False
+recent_files = []
+split_enabled = False
+split_frame = None
+split_editor = None
+split_line_counter = None
 
 def update_line_counter(event=None):
-    text = text_area.get("1.0", "end-1c")
+    widget = event.widget if event and event.widget in documents else text_area
+    _refresh_line_counter(widget)
+
+def _refresh_line_counter(widget):
+    if widget is None or widget not in documents:
+        return
+    text = widget.get("1.0", "end-1c")
     lines = text.count("\n") + 1
     line_numbers = "\n".join(str(i) for i in range(1, lines + 1))
-    line_counter.config(state="normal")
-    line_counter.delete("1.0", "end")
-    line_counter.insert("1.0", line_numbers)
-    line_counter.config(state="disabled")
-
-text_area.bind("<KeyRelease>", update_line_counter)
-text_area.bind("<MouseWheel>", update_line_counter)
-text_area.bind("<ButtonRelease-1>", update_line_counter)
-text_area.bind("<<Change>>", update_line_counter)
-text_area.bind("<Configure>", update_line_counter)
-update_line_counter()
+    gutter = documents[widget]["line_counter"]
+    gutter.config(state="normal")
+    gutter.delete("1.0", "end")
+    gutter.insert("1.0", line_numbers)
+    gutter.config(state="disabled")
 
 # Github info
 OWNER = "Northy2410"
 REPO = "PixelScript-Plus"
-CURRENT_VERSION = "1.7"
+CURRENT_VERSION = "2.0"
 
 # update check (manual invocation)
 def check_for_update(parent=None, silent=False):
-    """Check GitHub for the latest release.
-
-    Parameters:
-        parent: optional window to associate dialogs with.
-        silent (bool): if True suppress info/error dialogs when no update or failure.
-    """
-    # Load beta updates preference
+    parent = root if parent is None else parent
     check_beta = load_beta_updates_setting()
-    
-    if check_beta:
-        # Get all releases including pre-releases
-        url = "https://api.github.com/repos/northy2410/pixelscript-plus/releases"
-        try:
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            releases = response.json()
-            # Filter to get the latest release (including pre-releases)
-            if not releases:
-                raise Exception("No releases found")
-            latest_release = releases[0]  # GitHub returns releases sorted by date
-        except Exception as e:
-            if not silent:
-                fail_win = tk.Toplevel(root if parent is None else parent)
-                fail_win.title("Update Check Failed")
-                fail_win.geometry("360x160")
-                fail_win.resizable(False, False)
-                fail_win.attributes("-topmost", True)
-                msg = tk.Label(
-                    fail_win,
-                    text=f"Could not check for updates.\n\n{e}",
-                    font=("Arial", 12), justify="center"
-                )
-                msg.pack(pady=18)
-                btn = tk.Button(
-                    fail_win,
-                    text="OK",
-                    command=fail_win.destroy,
-                    font=("Arial", 11)
-                )
-                btn.pack(pady=5)
-                style_window(fail_win, current_theme)
-            return
-    else:
-        # Get only stable releases
-        url = "https://api.github.com/repos/northy2410/pixelscript-plus/releases/latest"
-        try:
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            latest_release = response.json()
-        except Exception as e:
-            if not silent:
-                fail_win = tk.Toplevel(root if parent is None else parent)
-                fail_win.title("Update Check Failed")
-                fail_win.geometry("360x160")
-                fail_win.resizable(False, False)
-                fail_win.attributes("-topmost", True)
-                msg = tk.Label(
-                    fail_win,
-                    text=f"Could not check for updates.\n\n{e}",
-                    font=("Arial", 12), justify="center"
-                )
-                msg.pack(pady=18)
-                btn = tk.Button(
-                    fail_win,
-                    text="OK",
-                    command=fail_win.destroy,
-                    font=("Arial", 11)
-                )
-                btn.pack(pady=5)
-                style_window(fail_win, current_theme)
-            return
-    
+    url = (
+        f"https://api.github.com/repos/{OWNER}/{REPO}/releases"
+        if check_beta else
+        f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
+    )
     try:
-        latest_version = latest_release.get("tag_name", "").lstrip("vV")
-        is_prerelease = latest_release.get("prerelease", False)
-        if latest_version and latest_version != CURRENT_VERSION:
-            def open_release():
-                webbrowser.open(latest_release['html_url'])
-                update_win.destroy()
-            update_win = tk.Toplevel(root if parent is None else parent)
-            update_win.title("Update Available")
-            update_win.geometry("360x190")
-            update_win.resizable(False, False)
-            update_win.attributes("-topmost", True)
-            
-            version_type = " (Beta)" if is_prerelease else ""
-            msg = tk.Label(
-                update_win,
-                text=f"A new version is available!\n\nLatest: {latest_version}{version_type}\nCurrent: {CURRENT_VERSION}",
-                font=("Arial", 12), justify="center"
-            )
-            msg.pack(pady=15)
-            btn = tk.Button(
-                update_win,
-                text="Open Release Page",
-                command=open_release,
-                font=("Arial", 11)
-            )
-            btn.pack(pady=5)
-            style_window(update_win, current_theme)
-        else:
-            if not silent:
-                up_win = tk.Toplevel(root if parent is None else parent)
-                up_win.title("Up To Date")
-                up_win.geometry("360x140")
-                up_win.resizable(False, False)
-                up_win.attributes("-topmost", True)
-                msg = tk.Label(
-                    up_win,
-                    text=f"You're on the latest version (v{CURRENT_VERSION}).",
-                    font=("Arial", 12), justify="center"
-                )
-                msg.pack(pady=25)
-                btn = tk.Button(
-                    up_win,
-                    text="OK",
-                    command=up_win.destroy,
-                    font=("Arial", 11)
-                )
-                btn.pack(pady=5)
-                style_window(up_win, current_theme)
-    except Exception as e:
+        response = requests.get(url, timeout=8)
+        response.raise_for_status()
+        releases = response.json()
+        latest_release = releases[0] if check_beta and releases else releases
+        if not isinstance(latest_release, dict):
+            raise ValueError("GitHub returned an invalid release response.")
+    except (requests.RequestException, ValueError, IndexError) as exc:
         if not silent:
-            fail_win = tk.Toplevel(root if parent is None else parent)
-            fail_win.title("Update Check Failed")
-            fail_win.geometry("360x160")
-            fail_win.resizable(False, False)
-            fail_win.attributes("-topmost", True)
-            msg = tk.Label(
-                fail_win,
-                text=f"Could not check for updates.\n\n{e}",
-                font=("Arial", 12), justify="center"
-            )
-            msg.pack(pady=18)
-            btn = tk.Button(
-                fail_win,
-                text="OK",
-                command=fail_win.destroy,
-                font=("Arial", 11)
-            )
-            btn.pack(pady=5)
-            style_window(fail_win, current_theme)
+            messagebox.showerror("Update Check Failed", f"Could not check for updates.\n\n{exc}", parent=parent)
+        return
 
-unsaved_changes = False
-current_file_path = None
-current_ntsi_password = None
-current_ntsi_compressed = False
+    latest_version = latest_release.get("tag_name", "").lstrip("vV")
+    release_url = latest_release.get("html_url")
+    if not latest_version or not release_url:
+        if not silent:
+            messagebox.showerror(
+                "Update Check Failed",
+                "The GitHub release is missing its version or download page.",
+                parent=parent,
+            )
+        return
+    latest_numbers = _version_numbers(latest_version)
+    current_numbers = _version_numbers(CURRENT_VERSION)
+    is_newer = latest_version != CURRENT_VERSION
+    if latest_numbers is not None and current_numbers is not None:
+        width = max(len(latest_numbers), len(current_numbers))
+        is_newer = (
+            latest_numbers + (0,) * (width - len(latest_numbers))
+            > current_numbers + (0,) * (width - len(current_numbers))
+        )
+    if not is_newer:
+        if not silent:
+            messagebox.showinfo("Up To Date", f"You're using v{CURRENT_VERSION}. No newer release is available.", parent=parent)
+        return
+
+    update_win = tk.Toplevel(parent)
+    update_win.title(f"PixelScript+ {latest_version} Release Notes")
+    update_win.geometry("650x520")
+    update_win.minsize(480, 360)
+    update_win.transient(parent)
+    version_type = " (Beta)" if latest_release.get("prerelease", False) else ""
+    tk.Label(
+        update_win,
+        text=f"PixelScript+ {latest_version}{version_type} is available  ·  Current: {CURRENT_VERSION}",
+        font=("Arial", 12, "bold"),
+        anchor="w",
+    ).pack(fill="x", padx=12, pady=(12, 6))
+    notes_frame = tk.Frame(update_win)
+    notes_frame.pack(fill="both", expand=True, padx=12, pady=6)
+    notes = tk.Text(notes_frame, wrap="word", padx=10, pady=8)
+    notes_scroll = ttk.Scrollbar(notes_frame, orient="vertical", command=notes.yview)
+    notes.configure(yscrollcommand=notes_scroll.set)
+    notes.pack(side="left", fill="both", expand=True)
+    notes_scroll.pack(side="right", fill="y")
+    release_body = latest_release.get("body") or "No release notes were provided."
+    renderer = _MarkdownTextRenderer(notes)
+    renderer.feed(markdown_to_html(release_body, title="Release Notes"))
+    renderer.close()
+    notes.configure(state="disabled")
+    buttons = tk.Frame(update_win)
+    buttons.pack(fill="x", padx=12, pady=(4, 12))
+    tk.Button(
+        buttons,
+        text="Open GitHub Page to Download",
+        command=lambda: _open_release_page(release_url, update_win),
+        font=("Arial", 10),
+    ).pack(side="left")
+    tk.Button(buttons, text="Close", command=update_win.destroy, width=12).pack(side="right")
+    style_window(update_win, current_theme)
+
+def _open_release_page(url, parent):
+    try:
+        if not webbrowser.open(url):
+            raise OSError("The default browser did not accept the request.")
+    except (OSError, webbrowser.Error) as exc:
+        messagebox.showerror("Open Release Page", str(exc), parent=parent)
+
+def _version_numbers(version):
+    match = re.match(r"^[vV]?(\d+(?:\.\d+)*)(?:[-+].*)?$", version)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
 
 NTSI_MAGIC = bytes.fromhex("A70E19C4")
 NTSI_VERSION = 2
@@ -230,35 +185,6 @@ NTSI_FLAG_COMPRESSED = 0x0001
 NTSI_PBKDF2_ITERATIONS = 300_000
 NTSI_HEADER = struct.Struct("<4sHHH16s12sQQI")
 MAX_NTSI_TEXT_BYTES = 64 * 1024 * 1024
-
-def on_text_modified(event=None):
-    global unsaved_changes
-    unsaved_changes = text_area.edit_modified()
-    text_area.edit_modified(False)
-
-text_area.bind("<<Modified>>", on_text_modified)
-
-def on_closing():
-    global current_ntsi_password
-    if unsaved_changes:
-        if messagebox.askyesno("Unsaved Changes", "You have unsaved changes. Do you want to exit without saving?"):
-            current_ntsi_password = None
-            root.destroy()
-    else:
-        current_ntsi_password = None
-        root.destroy()
-
-root.protocol("WM_DELETE_WINDOW", on_closing)
-
-def new_file():
-    global unsaved_changes, current_file_path, current_ntsi_password, current_ntsi_compressed
-    text_area.delete(1.0, tk.END)
-    unsaved_changes = False
-    current_file_path = None
-    current_ntsi_password = None
-    current_ntsi_compressed = False
-    root.title("PixelScript+")
-    update_line_counter()
 
 def require_ntsi_support():
     if AESGCM is None:
@@ -382,120 +308,313 @@ def ask_ntsi_password(confirm=False):
             return None
     return password
 
+def _document_title(state):
+    path = state["path"]
+    title = os.path.basename(path) if path else "Untitled"
+    return f"{title}{' *' if state['modified'] else ''}"
+
+def _refresh_document_title(state):
+    editor_notebook.tab(state["frame"], text=_document_title(state))
+    if state["editor"] is text_area:
+        root.title(f"PixelScript+ - {_document_title(state)}")
+
+def _apply_editor_theme(editor, gutter, theme):
+    if theme == "dark":
+        editor.config(bg="#23272e", fg="#f8f8f2", insertbackground="#f8f8f2")
+        gutter.config(bg="#23272e", fg="#5c6370")
+    else:
+        editor.config(bg="white", fg="black", insertbackground="black")
+        gutter.config(bg="#f0f0f0", fg="gray")
+
+def _set_active_document(event=None):
+    global text_area, line_counter, current_file_path, current_ntsi_password
+    global current_ntsi_compressed, unsaved_changes
+    selected = editor_notebook.select()
+    if not selected:
+        return
+    editor = document_frames.get(selected)
+    if editor is None:
+        return
+    state = documents[editor]
+    text_area = editor
+    line_counter = state["line_counter"]
+    current_file_path = state["path"]
+    current_ntsi_password = state["ntsi_password"]
+    current_ntsi_compressed = state["ntsi_compressed"]
+    unsaved_changes = state["modified"]
+    if "PLUGIN_API" in globals():
+        PLUGIN_API["text_area"] = editor
+    update_line_counter()
+    _refresh_document_title(state)
+    if split_enabled:
+        _sync_split_view()
+
+def create_document(text="", path=None, modified=False, password=None,
+                    compressed=False, recovery_id=None, select=True):
+    frame = ttk.Frame(editor_notebook)
+    gutter = tk.Text(
+        frame, width=4, padx=4, takefocus=0, border=0, wrap="none",
+        background="#f0f0f0", foreground="gray", state="disabled", font=current_font
+    )
+    gutter.pack(side="left", fill="y")
+    editor = tk.Text(frame, wrap="word", undo=True, font=current_font)
+    scrollbar = ttk.Scrollbar(frame, orient="vertical", command=editor.yview)
+    editor.configure(yscrollcommand=scrollbar.set)
+    editor.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+    if "current_theme" in globals():
+        _apply_editor_theme(editor, gutter, current_theme)
+    if text:
+        editor.insert("1.0", text)
+    editor.edit_modified(False)
+    state = {
+        "frame": frame,
+        "editor": editor,
+        "line_counter": gutter,
+        "path": os.path.abspath(path) if path else None,
+        "modified": bool(modified),
+        "ntsi_password": password,
+        "ntsi_compressed": compressed,
+        "recovery_id": recovery_id or uuid.uuid4().hex,
+        "disk_snapshot": _file_snapshot(path),
+        "external_change": False,
+        "preview": None,
+        "preview_after": None,
+    }
+    documents[editor] = state
+    document_frames[str(frame)] = editor
+    editor.bind("<KeyRelease>", update_line_counter)
+    editor.bind("<MouseWheel>", update_line_counter)
+    editor.bind("<ButtonRelease-1>", update_line_counter)
+    editor.bind("<Configure>", update_line_counter)
+    editor.bind("<<Modified>>", on_text_modified)
+    editor_notebook.add(frame, text=_document_title(state))
+    if select:
+        editor_notebook.select(frame)
+        _set_active_document()
+    _refresh_line_counter(editor)
+    return editor
+
+def on_text_modified(event=None):
+    global unsaved_changes
+    editor = event.widget if event else text_area
+    state = documents.get(editor)
+    if state is None or not editor.edit_modified():
+        return
+    editor.edit_modified(False)
+    state["modified"] = True
+    _refresh_document_title(state)
+    if editor is text_area:
+        unsaved_changes = True
+    if state["preview"] and state["preview"].winfo_exists():
+        if state["preview_after"]:
+            root.after_cancel(state["preview_after"])
+        state["preview_after"] = root.after(250, lambda s=state: _refresh_markdown_preview(s))
+    if split_enabled and editor is text_area:
+        _sync_split_view()
+
+def new_file():
+    create_document()
+
+def _file_snapshot(path):
+    if not path:
+        return None
+    try:
+        stat = os.stat(path)
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+def on_closing():
+    modified = [state for state in documents.values() if state["modified"]]
+    if modified:
+        choice = messagebox.askyesnocancel(
+            "Unsaved Changes",
+            "Save all unsaved documents before closing?\n\n"
+            "Choose No to keep recovery drafts for the next launch.",
+        )
+        if choice is None:
+            return
+        if choice:
+            for state in modified:
+                editor_notebook.select(state["frame"])
+                _set_active_document()
+                save_file()
+                if state["modified"]:
+                    return
+        else:
+            for state in modified:
+                try:
+                    _save_recovery_draft(state)
+                except (OSError, ValueError, zlib.error) as exc:
+                    messagebox.showerror("Draft Recovery", f"Could not save a recovery draft:\n{exc}")
+                    return
+    _save_session()
+    for state in documents.values():
+        state["ntsi_password"] = None
+    root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_closing)
+
 def open_file():
-    global unsaved_changes, current_file_path, current_ntsi_password, current_ntsi_compressed
     file = filedialog.askopenfilename(
         filetypes=[
-            ("Supported Files", "*.txt *.NTSI"),
+            ("Text and Markdown Files", "*.txt *.md *.MD"),
+            ("Supported Files", "*.txt *.md *.MD *.NTSI"),
             ("Text Files", "*.txt"),
+            ("Markdown Files", "*.md *.MD"),
             ("NorthTech S.I.A.V.A. Memory File", "*.NTSI"),
         ]
     )
     if file:
-        try:
-            if os.path.splitext(file)[1].lower() == ".ntsi":
-                if not require_ntsi_support():
-                    return
-                password = ask_ntsi_password()
-                if password is None:
-                    return
-                with open(file, "rb") as f:
-                    data = f.read()
-                text = decode_ntsi(data, password)
-                info = inspect_ntsi(data)
-                current_ntsi_password = password
-                current_ntsi_compressed = info["compressed"]
-            else:
-                with open(file, "r", encoding="utf-8") as f:
-                    text = f.read()
-                current_ntsi_password = None
-                current_ntsi_compressed = False
-
-            text_area.delete(1.0, tk.END)
-            text_area.insert(tk.END, text)
-            text_area.edit_modified(False)
-        except (OSError, UnicodeDecodeError, UnicodeEncodeError, ValueError, zlib.error) as exc:
-            messagebox.showerror("Unable to Open File", str(exc))
-            return
-        unsaved_changes = False
-        current_file_path = file
-        root.title(f"PixelScript+ - {os.path.basename(file)}")
-        update_line_counter()
+        _load_document(file)
 
 def save_file():
     """Save to current file, or prompt for filename if no file is open."""
-    global unsaved_changes, current_file_path, current_ntsi_password
     if current_file_path:
-        try:
-            if os.path.splitext(current_file_path)[1].lower() == ".ntsi":
-                if not require_ntsi_support():
-                    return
-                if current_ntsi_password is None:
-                    current_ntsi_password = ask_ntsi_password(confirm=True)
-                    if current_ntsi_password is None:
-                        return
-                data = encode_ntsi(
-                    text_area.get("1.0", "end-1c"),
-                    current_ntsi_password,
-                    compress=current_ntsi_compressed,
-                )
-                with open(current_file_path, "wb") as f:
-                    f.write(data)
-            else:
-                with open(current_file_path, "w", encoding="utf-8", newline="") as f:
-                    f.write(text_area.get("1.0", "end-1c"))
-        except (OSError, UnicodeDecodeError, UnicodeEncodeError, ValueError, zlib.error) as exc:
-            messagebox.showerror("Unable to Save File", str(exc))
-            return
-        unsaved_changes = False
-        messagebox.showinfo("Saved", "File saved successfully!")
+        if _write_document(documents[text_area]):
+            messagebox.showinfo("Saved", "File saved successfully!")
     else:
-        # No file open, use Save As
         save_as_file()
 
 def save_as_file():
     """Always prompt for a new filename to save to."""
-    global unsaved_changes, current_file_path, current_ntsi_password, current_ntsi_compressed
     file = filedialog.asksaveasfilename(
         defaultextension=".txt",
         filetypes=[
             ("Text Files", "*.txt"),
+            ("Markdown Files", "*.md *.MD"),
             ("NorthTech S.I.A.V.A. Memory File", "*.NTSI"),
         ],
     )
-    if file:
-        try:
-            if os.path.splitext(file)[1].lower() == ".ntsi":
-                if not require_ntsi_support():
-                    return
+    if file and _write_document(documents[text_area], file):
+        messagebox.showinfo("Saved", "File saved successfully!")
+
+def save_as_markdown_file():
+    file = filedialog.asksaveasfilename(
+        defaultextension=".md",
+        filetypes=[("Markdown Files", "*.md *.MD")],
+    )
+    if file and _write_document(documents[text_area], file):
+        messagebox.showinfo("Saved", "Markdown file saved successfully!")
+
+def _load_document(path, password=None, recovery_id=None, select=True):
+    normalized = os.path.normcase(os.path.abspath(path))
+    for editor, state in documents.items():
+        if state["path"] and os.path.normcase(state["path"]) == normalized:
+            editor_notebook.select(state["frame"])
+            _set_active_document()
+            return editor
+    try:
+        if os.path.splitext(path)[1].lower() == ".ntsi":
+            if not require_ntsi_support():
+                return None
+            password = password or ask_ntsi_password()
+            if password is None:
+                return None
+            with open(path, "rb") as stream:
+                data = stream.read()
+            content = decode_ntsi(data, password)
+            compressed = inspect_ntsi(data)["compressed"]
+        else:
+            with open(path, "r", encoding="utf-8") as stream:
+                content = stream.read()
+            password = None
+            compressed = False
+    except (OSError, UnicodeDecodeError, ValueError, zlib.error) as exc:
+        messagebox.showerror("Unable to Open File", str(exc))
+        return None
+
+    blank_active = (
+        text_area is not None
+        and text_area in documents
+        and not documents[text_area]["path"]
+        and not documents[text_area]["modified"]
+        and not text_area.get("1.0", "end-1c")
+    )
+    if blank_active:
+        editor = text_area
+        state = documents[editor]
+    else:
+        editor = create_document(select=False)
+        state = documents[editor]
+    editor.delete("1.0", "end")
+    editor.insert("1.0", content)
+    editor.edit_modified(False)
+    state.update({
+        "path": os.path.abspath(path),
+        "modified": False,
+        "ntsi_password": password,
+        "ntsi_compressed": compressed,
+        "recovery_id": recovery_id or state["recovery_id"],
+        "disk_snapshot": _file_snapshot(path),
+        "external_change": False,
+    })
+    _refresh_document_title(state)
+    if select:
+        editor_notebook.select(state["frame"])
+        _set_active_document()
+    _record_recent_file(path)
+    return editor
+
+def get_recovery_dir():
+    folder = os.path.join(os.path.dirname(SETTINGS_FILE), "recovery")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+def _write_document(state, path=None):
+    global current_file_path, current_ntsi_password, current_ntsi_compressed, unsaved_changes
+    destination = path or state["path"]
+    if not destination:
+        return False
+    is_ntsi = os.path.splitext(destination)[1].lower() == ".ntsi"
+    password = state["ntsi_password"]
+    compressed = state["ntsi_compressed"]
+    try:
+        content = state["editor"].get("1.0", "end-1c")
+        if state["external_change"] and destination == state["path"]:
+            if not messagebox.askyesno(
+                "File Changed on Disk",
+                "This file changed outside PixelScript. Overwrite those changes?",
+            ):
+                return False
+        if is_ntsi:
+            if not require_ntsi_support():
+                return False
+            if not password or destination != state["path"]:
                 password = ask_ntsi_password(confirm=True)
                 if password is None:
-                    return
-                compress = messagebox.askyesno(
+                    return False
+                compressed = messagebox.askyesno(
                     "Compress NTSI File",
                     "Compress the text before encrypting?",
                 )
-                data = encode_ntsi(
-                    text_area.get("1.0", "end-1c"),
-                    password,
-                    compress=compress,
-                )
-                with open(file, "wb") as f:
-                    f.write(data)
-                current_ntsi_password = password
-                current_ntsi_compressed = compress
-            else:
-                with open(file, "w", encoding="utf-8", newline="") as f:
-                    f.write(text_area.get("1.0", "end-1c"))
-                current_ntsi_password = None
-                current_ntsi_compressed = False
-        except (OSError, UnicodeDecodeError, UnicodeEncodeError, ValueError, zlib.error) as exc:
-            messagebox.showerror("Unable to Save File", str(exc))
-            return
+            data = encode_ntsi(content, password, compress=compressed)
+            with open(destination, "wb") as stream:
+                stream.write(data)
+        else:
+            with open(destination, "w", encoding="utf-8", newline="") as stream:
+                stream.write(content)
+    except (OSError, UnicodeDecodeError, UnicodeEncodeError, ValueError, zlib.error) as exc:
+        messagebox.showerror("Unable to Save File", str(exc))
+        return False
+    state.update({
+        "path": os.path.abspath(destination),
+        "ntsi_password": password if is_ntsi else None,
+        "ntsi_compressed": compressed if is_ntsi else False,
+        "modified": False,
+        "disk_snapshot": _file_snapshot(destination),
+        "external_change": False,
+    })
+    _remove_recovery_draft(state)
+    _refresh_document_title(state)
+    _record_recent_file(destination)
+    if state["editor"] is text_area:
+        current_file_path = state["path"]
+        current_ntsi_password = state["ntsi_password"]
+        current_ntsi_compressed = state["ntsi_compressed"]
         unsaved_changes = False
-        current_file_path = file
-        root.title(f"PixelScript+ - {os.path.basename(file)}")
-        messagebox.showinfo("Saved", "File saved successfully!")
+    return True
 
 def set_font_family(family):
     current_font.config(family=family)
@@ -688,6 +807,512 @@ def load_beta_updates_setting():
         return config.getboolean("Updates", "check_beta", fallback=False)
     return False
 
+SESSION_FILE = os.path.join(os.path.dirname(SETTINGS_FILE), "session.json")
+RECENT_FILE = os.path.join(os.path.dirname(SETTINGS_FILE), "recent.json")
+
+def _atomic_write(path, data):
+    temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, "wb") as stream:
+            stream.write(data)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+def _record_recent_file(path):
+    global recent_files
+    normalized = os.path.abspath(path)
+    recent_files = [item for item in recent_files if os.path.normcase(item) != os.path.normcase(normalized)]
+    recent_files.insert(0, normalized)
+    recent_files = recent_files[:10]
+    try:
+        _atomic_write(RECENT_FILE, json.dumps(recent_files, indent=2).encode("utf-8"))
+    except OSError as exc:
+        messagebox.showwarning("Recent Files", f"Could not save the recent files list:\n{exc}")
+    if "recent_menu" in globals():
+        _refresh_recent_menu()
+
+def _load_recent_files():
+    global recent_files
+    if not os.path.exists(RECENT_FILE):
+        return
+    try:
+        with open(RECENT_FILE, "r", encoding="utf-8") as stream:
+            entries = json.load(stream)
+        if not isinstance(entries, list) or not all(isinstance(item, str) for item in entries):
+            raise ValueError("Recent files data has an invalid format.")
+        recent_files = [item for item in entries if os.path.isfile(item)][:10]
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        messagebox.showwarning("Recent Files", f"Could not load the recent files list:\n{exc}")
+        recent_files = []
+
+def _refresh_recent_menu():
+    recent_menu.delete(0, "end")
+    available = [path for path in recent_files if os.path.isfile(path)]
+    if not available:
+        recent_menu.add_command(label="(No recent files)", state="disabled")
+        return
+    for path in available:
+        recent_menu.add_command(
+            label=path,
+            command=lambda selected=path: _load_document(selected),
+        )
+
+def _save_session():
+    selected = documents.get(text_area, {})
+    saved_documents = [
+        state for state in documents.values()
+        if state["path"] or state["modified"] or state["editor"].get("1.0", "end-1c")
+    ]
+    session = {
+        "version": 1,
+        "selected_recovery_id": selected.get("recovery_id"),
+        "documents": [
+            {
+                "path": state["path"],
+                "recovery_id": state["recovery_id"],
+                "modified": state["modified"],
+            }
+            for state in saved_documents
+        ],
+    }
+    try:
+        if not saved_documents:
+            try:
+                os.remove(SESSION_FILE)
+            except FileNotFoundError:
+                pass
+            _save_session.last_payload = None
+            return
+        payload = json.dumps(session, indent=2).encode("utf-8")
+        if getattr(_save_session, "last_payload", None) != payload:
+            _atomic_write(SESSION_FILE, payload)
+            _save_session.last_payload = payload
+    except OSError as exc:
+        if not getattr(_save_session, "error_shown", False):
+            messagebox.showwarning("Session Restore", f"Could not save your open tabs:\n{exc}")
+            _save_session.error_shown = True
+
+def _recovery_path(state, encrypted=None):
+    if encrypted is None:
+        encrypted = bool(state["path"] and os.path.splitext(state["path"])[1].lower() == ".ntsi")
+    extension = ".ntsi" if encrypted else ".txt"
+    return os.path.join(get_recovery_dir(), state["recovery_id"] + extension)
+
+def _remove_recovery_draft(state):
+    for extension in (".txt", ".ntsi"):
+        path = os.path.join(get_recovery_dir(), state["recovery_id"] + extension)
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+def _save_recovery_draft(state):
+    content = state["editor"].get("1.0", "end-1c")
+    encrypted = bool(state["path"] and os.path.splitext(state["path"])[1].lower() == ".ntsi")
+    if encrypted and not state["ntsi_password"]:
+        return
+    path = _recovery_path(state, encrypted)
+    if state.get("recovery_content") == content and os.path.exists(path):
+        return
+    if encrypted:
+        payload = encode_ntsi(content, state["ntsi_password"], state["ntsi_compressed"])
+    else:
+        payload = content.encode("utf-8")
+    _atomic_write(path, payload)
+    state["recovery_content"] = content
+
+def _set_document_content(state, content, modified=False):
+    editor = state["editor"]
+    editor.delete("1.0", "end")
+    editor.insert("1.0", content)
+    editor.edit_modified(False)
+    state["modified"] = modified
+    state["recovery_content"] = content if modified else None
+    _refresh_document_title(state)
+    _refresh_line_counter(editor)
+    if editor is text_area:
+        _set_active_document()
+
+def _restore_session():
+    if not os.path.isfile(SESSION_FILE):
+        return
+    try:
+        with open(SESSION_FILE, "r", encoding="utf-8") as stream:
+            session = json.load(stream)
+        if not isinstance(session, dict):
+            raise ValueError("Session data has an invalid format.")
+        entries = session.get("documents", [])
+        if not isinstance(entries, list) or not entries:
+            return
+        if not all(isinstance(entry, dict) for entry in entries):
+            raise ValueError("Session document data has an invalid format.")
+        if not messagebox.askyesno(
+            "Restore Session",
+            f"Restore {len(entries)} document tab(s) from your previous session?",
+        ):
+            for entry in entries:
+                recovery_id = entry.get("recovery_id")
+                if isinstance(recovery_id, str):
+                    for extension in (".txt", ".ntsi"):
+                        try:
+                            os.remove(os.path.join(get_recovery_dir(), recovery_id + extension))
+                        except FileNotFoundError:
+                            pass
+            os.remove(SESSION_FILE)
+            return
+        for state in list(documents.values()):
+            editor_notebook.forget(state["frame"])
+            state["frame"].destroy()
+            documents.pop(state["editor"], None)
+            document_frames.pop(str(state["frame"]), None)
+        for entry in entries:
+            path = entry.get("path")
+            recovery_id = entry.get("recovery_id")
+            modified = bool(entry.get("modified"))
+            if not isinstance(recovery_id, str):
+                continue
+            candidate = os.path.join(get_recovery_dir(), recovery_id + ".txt")
+            encrypted = False
+            if not os.path.isfile(candidate):
+                candidate = os.path.join(get_recovery_dir(), recovery_id + ".ntsi")
+                encrypted = os.path.isfile(candidate)
+            if modified and (os.path.isfile(candidate)):
+                try:
+                    if encrypted:
+                        password = ask_ntsi_password()
+                        if password is None:
+                            continue
+                        with open(candidate, "rb") as stream:
+                            data = stream.read()
+                        content = decode_ntsi(data, password)
+                        compressed = inspect_ntsi(data)["compressed"]
+                    else:
+                        with open(candidate, "r", encoding="utf-8") as stream:
+                            content = stream.read()
+                        password = None
+                        compressed = False
+                    editor = create_document(
+                        content, path=path if isinstance(path, str) else None,
+                        modified=True, password=password, compressed=compressed,
+                        recovery_id=recovery_id, select=False,
+                    )
+                    documents[editor]["recovery_content"] = content
+                    continue
+                except (OSError, UnicodeDecodeError, ValueError, zlib.error) as exc:
+                    messagebox.showwarning("Session Recovery", f"Could not recover a draft:\n{exc}")
+            if isinstance(path, str) and os.path.isfile(path):
+                _load_document(path, recovery_id=recovery_id, select=False)
+            elif isinstance(path, str):
+                messagebox.showwarning("Session Restore", f"File no longer exists:\n{path}")
+        if not documents:
+            create_document()
+        wanted = session.get("selected_recovery_id")
+        for editor, state in documents.items():
+            if state["recovery_id"] == wanted:
+                editor_notebook.select(state["frame"])
+                break
+        _set_active_document()
+    except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        messagebox.showwarning("Session Restore", f"Could not restore the previous session:\n{exc}")
+
+def _reload_document_from_disk(state):
+    path = state["path"]
+    try:
+        if os.path.splitext(path)[1].lower() == ".ntsi":
+            password = state["ntsi_password"] or ask_ntsi_password()
+            if password is None:
+                return
+            with open(path, "rb") as stream:
+                data = stream.read()
+            content = decode_ntsi(data, password)
+            state["ntsi_password"] = password
+            state["ntsi_compressed"] = inspect_ntsi(data)["compressed"]
+        else:
+            with open(path, "r", encoding="utf-8") as stream:
+                content = stream.read()
+        _set_document_content(state, content)
+        state["disk_snapshot"] = _file_snapshot(path)
+        state["external_change"] = False
+        _remove_recovery_draft(state)
+    except (OSError, UnicodeDecodeError, ValueError, zlib.error) as exc:
+        messagebox.showerror("Reload Failed", str(exc))
+
+def _check_external_changes():
+    for state in list(documents.values()):
+        path = state["path"]
+        if not path:
+            continue
+        snapshot = _file_snapshot(path)
+        if snapshot == state["disk_snapshot"]:
+            continue
+        state["disk_snapshot"] = snapshot
+        state["external_change"] = True
+        if state["modified"]:
+            messagebox.showwarning(
+                "File Changed on Disk",
+                f"{os.path.basename(path)} changed outside PixelScript. Your edits are preserved; saving will ask before overwriting it.",
+            )
+        elif snapshot is None:
+            messagebox.showwarning(
+                "File Missing",
+                f"{os.path.basename(path)} was removed or is no longer accessible.",
+            )
+        elif messagebox.askyesno(
+            "File Changed on Disk",
+            f"{os.path.basename(path)} changed outside PixelScript. Reload it?",
+        ):
+            _reload_document_from_disk(state)
+
+def _autosave_tick():
+    for state in list(documents.values()):
+        if state["modified"]:
+            try:
+                _save_recovery_draft(state)
+            except (OSError, ValueError, zlib.error) as exc:
+                if not state.get("recovery_error_shown"):
+                    messagebox.showwarning("Draft Recovery", f"Could not save a recovery draft:\n{exc}")
+                    state["recovery_error_shown"] = True
+    _check_external_changes()
+    _save_session()
+    root.after(2000, _autosave_tick)
+
+def close_document(editor=None):
+    editor = editor or text_area
+    state = documents.get(editor)
+    if state is None:
+        return
+    if state["modified"]:
+        editor_notebook.select(state["frame"])
+        _set_active_document()
+        choice = messagebox.askyesnocancel(
+            "Unsaved Changes", f"Save changes to {_document_title(state).rstrip(' *')}?"
+        )
+        if choice is None:
+            return
+        if choice:
+            if state["path"]:
+                if not _write_document(state):
+                    return
+            else:
+                save_file()
+                if state["modified"]:
+                    return
+    _remove_recovery_draft(state)
+    if state["preview"] and state["preview"].winfo_exists():
+        state["preview"].destroy()
+    editor_notebook.forget(state["frame"])
+    state["frame"].destroy()
+    documents.pop(editor, None)
+    document_frames.pop(str(state["frame"]), None)
+    if not documents:
+        create_document()
+    else:
+        _set_active_document()
+    _save_session()
+
+def toggle_split_view():
+    global split_enabled, split_frame, split_editor, split_line_counter
+    if split_enabled:
+        workspace.forget(split_frame)
+        split_frame.destroy()
+        split_enabled = False
+        split_editor = None
+        split_line_counter = None
+        return
+    split_frame = tk.Frame(workspace)
+    tk.Label(split_frame, text="Read-only split view").pack(side="top", anchor="w")
+    split_line_counter = tk.Text(
+        split_frame, width=4, padx=4, takefocus=0, border=0, wrap="none",
+        background="#f0f0f0", foreground="gray", state="disabled", font=current_font
+    )
+    split_line_counter.pack(side="left", fill="y")
+    split_editor = tk.Text(split_frame, wrap="word", undo=False, font=current_font, state="disabled")
+    split_scroll = ttk.Scrollbar(split_frame, orient="vertical", command=split_editor.yview)
+    split_editor.configure(yscrollcommand=split_scroll.set)
+    split_editor.pack(side="left", fill="both", expand=True)
+    split_scroll.pack(side="right", fill="y")
+    workspace.add(split_frame)
+    split_enabled = True
+    _sync_split_view()
+
+def _sync_split_view():
+    if not split_enabled or split_editor is None or text_area is None:
+        return
+    content = text_area.get("1.0", "end-1c")
+    split_editor.configure(state="normal")
+    split_editor.delete("1.0", "end")
+    split_editor.insert("1.0", content)
+    split_editor.configure(state="disabled")
+    split_line_counter.configure(state="normal")
+    split_line_counter.delete("1.0", "end")
+    split_line_counter.insert("1.0", "\n".join(str(i) for i in range(1, content.count("\n") + 2)))
+    split_line_counter.configure(state="disabled")
+
+class _MarkdownTextRenderer(HTMLParser):
+    def __init__(self, widget):
+        super().__init__()
+        self.widget = widget
+        self.active_tags = []
+        self.ignored_depth = 0
+        for level in range(1, 7):
+            widget.tag_configure(f"h{level}", font=("Arial", max(12, 24 - level * 2), "bold"), spacing1=10)
+        widget.tag_configure("strong", font=("Arial", 12, "bold"))
+        widget.tag_configure("em", font=("Arial", 12, "italic"))
+        widget.tag_configure("code", font=("Courier New", 10), background="#eeeeee")
+        widget.tag_configure("blockquote", foreground="#666666", lmargin1=16, lmargin2=16)
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"head", "style", "title"}:
+            self.ignored_depth += 1
+            return
+        if self.ignored_depth:
+            return
+        if tag.startswith("h") and len(tag) == 2 and tag[1].isdigit():
+            self.active_tags.append(tag)
+        elif tag in {"strong", "em", "code", "blockquote"}:
+            self.active_tags.append(tag)
+        elif tag == "pre":
+            self.active_tags.append("code")
+        elif tag == "p":
+            self._newline()
+        elif tag == "li":
+            self._newline()
+            self.widget.insert("end", "\u2022 ")
+        elif tag == "br":
+            self._newline()
+
+    def handle_endtag(self, tag):
+        if tag in {"head", "style", "title"} and self.ignored_depth:
+            self.ignored_depth -= 1
+            return
+        if self.ignored_depth:
+            return
+        if tag == "pre":
+            self._remove_tag("code")
+            self._newline()
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6", "strong", "em", "code", "blockquote"}:
+            self._remove_tag(tag)
+            if tag.startswith("h") or tag == "blockquote":
+                self._newline()
+        elif tag in {"p", "ul", "ol"}:
+            self._newline()
+
+    def handle_data(self, data):
+        if not self.ignored_depth:
+            self.widget.insert("end", data, tuple(self.active_tags))
+
+    def _remove_tag(self, tag):
+        if tag in self.active_tags:
+            self.active_tags.remove(tag)
+
+    def _newline(self):
+        if not self.widget.get("1.0", "end-1c").endswith("\n"):
+            self.widget.insert("end", "\n")
+
+def _refresh_markdown_preview(state):
+    state["preview_after"] = None
+    win = state["preview"]
+    if not win or not win.winfo_exists():
+        return
+    source = state["editor"].get("1.0", "end-1c")
+    outline = state["outline"]
+    children = outline.get_children()
+    if children:
+        outline.delete(*children)
+    for line, heading, level in extract_headings(source):
+        outline.insert("", "end", iid=str(line), text=f"{'  ' * (level - 1)}{heading}")
+    preview = state["preview_text"]
+    preview.configure(state="normal")
+    preview.delete("1.0", "end")
+    parser = _MarkdownTextRenderer(preview)
+    parser.feed(markdown_to_html(source))
+    parser.close()
+    preview.configure(state="disabled")
+
+def open_markdown_preview():
+    if text_area is None:
+        return
+    state = documents[text_area]
+    if state["preview"] and state["preview"].winfo_exists():
+        state["preview"].deiconify()
+        state["preview"].lift()
+        _refresh_markdown_preview(state)
+        return
+    win = tk.Toplevel(root)
+    win.title("Markdown Preview")
+    win.geometry("850x600")
+    split = tk.PanedWindow(win, orient="horizontal", sashwidth=5, sashrelief="raised")
+    split.pack(fill="both", expand=True)
+    outline = ttk.Treeview(split, show="tree", selectmode="browse")
+    outline.column("#0", width=220, stretch=False)
+    preview_frame = tk.Frame(split)
+    preview = tk.Text(preview_frame, wrap="word", state="disabled", padx=18, pady=14)
+    preview_scroll = ttk.Scrollbar(preview_frame, orient="vertical", command=preview.yview)
+    preview.configure(yscrollcommand=preview_scroll.set)
+    preview.pack(side="left", fill="both", expand=True)
+    preview_scroll.configure(command=preview.yview)
+    preview_scroll.pack(side="right", fill="y")
+    split.add(outline)
+    split.add(preview_frame)
+    state["preview"] = win
+    state["preview_text"] = preview
+    state["outline"] = outline
+
+    def jump_to_heading(event=None):
+        selected = outline.selection()
+        if selected:
+            state["editor"].mark_set("insert", f"{selected[0]}.0")
+            state["editor"].see("insert")
+            state["editor"].focus_set()
+
+    outline.bind("<<TreeviewSelect>>", jump_to_heading)
+    win.protocol("WM_DELETE_WINDOW", lambda s=state, w=win: _close_markdown_preview(s, w))
+    style_window(win, current_theme)
+    _refresh_markdown_preview(state)
+
+def _close_markdown_preview(state, window):
+    if state["preview_after"]:
+        root.after_cancel(state["preview_after"])
+        state["preview_after"] = None
+    state["preview"] = None
+    window.destroy()
+
+def export_markdown_html():
+    if text_area is None:
+        return
+    path = filedialog.asksaveasfilename(
+        defaultextension=".html",
+        filetypes=[("HTML files", "*.html")],
+    )
+    if not path:
+        return
+    title = os.path.basename(documents[text_area]["path"] or "Markdown Export")
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as stream:
+            stream.write(markdown_to_html(text_area.get("1.0", "end-1c"), title=title))
+    except OSError as exc:
+        messagebox.showerror("HTML Export Failed", str(exc))
+        return
+    messagebox.showinfo("Export Complete", f"Markdown exported to:\n{path}")
+
+def export_markdown_pdf():
+    if text_area is None:
+        return
+    path = filedialog.asksaveasfilename(
+        defaultextension=".pdf",
+        filetypes=[("PDF files", "*.pdf")],
+    )
+    if not path:
+        return
+    try:
+        export_pdf(text_area.get("1.0", "end-1c"), path)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        messagebox.showerror("PDF Export Failed", str(exc))
+        return
+    messagebox.showinfo("Export Complete", f"PDF exported to:\n{path}")
+
 def save_settings(theme, check_beta=None):
     """Save settings to file.
     
@@ -712,14 +1337,26 @@ def save_settings(theme, check_beta=None):
 def apply_theme(theme):
     if theme == "dark":
         root.config(bg="#23272e")
-        text_area.config(bg="#23272e", fg="#f8f8f2", insertbackground="#f8f8f2")
+        workspace.config(bg="#23272e")
         menu_bar.config(bg="#23272e", fg="#f8f8f2")
-        line_counter.config(bg="#23272e", fg="#5c6370")
     else:
         root.config(bg="SystemButtonFace")
-        text_area.config(bg="white", fg="black", insertbackground="black")
+        workspace.config(bg="SystemButtonFace")
         menu_bar.config(bg="SystemButtonFace", fg="black")
-        line_counter.config(bg="#f0f0f0", fg="gray")
+    for state in documents.values():
+        _apply_editor_theme(state["editor"], state["line_counter"], theme)
+    if split_enabled and split_editor is not None:
+        split_editor.config(
+            bg="#23272e" if theme == "dark" else "white",
+            fg="#f8f8f2" if theme == "dark" else "black",
+        )
+        split_line_counter.config(
+            bg="#23272e" if theme == "dark" else "#f0f0f0",
+            fg="#5c6370" if theme == "dark" else "gray",
+        )
+    for window in root.winfo_children():
+        if isinstance(window, tk.Toplevel):
+            style_window(window, theme)
 
 def style_window(win, theme):
     if theme == "dark":
@@ -753,6 +1390,8 @@ def style_window(win, theme):
             elif cls == "Button":
                 widget.config(bg=button_bg, fg=button_fg, activebackground=button_bg, activeforeground=button_fg)
             elif cls == "Entry":
+                widget.config(bg=entry_bg, fg=entry_fg, insertbackground=entry_fg)
+            elif cls == "Text":
                 widget.config(bg=entry_bg, fg=entry_fg, insertbackground=entry_fg)
             elif cls == "Listbox":
                 # Dark theme list styling
@@ -835,7 +1474,7 @@ def open_about():
         os_info = platform.platform()
 
     info_block = (
-        "A simple, extendable text editor.\n"
+        "A tabbed, extendable text and Markdown editor.\n"
         f"Running on: {os_info}\n"
         "\n"
         "© 2026 Riley Northcote. All rights reserved."
@@ -1038,9 +1677,24 @@ file_menu.add_command(label="New (Ctrl+N)", command=new_file)
 file_menu.add_command(label="Open (Ctrl+O)", command=open_file)
 file_menu.add_command(label="Save (Ctrl+S)", command=save_file)
 file_menu.add_command(label="Save As (Ctrl+Shift+S)", command=save_as_file)
+file_menu.add_command(label="Save As Markdown...", command=save_as_markdown_file)
+file_menu.add_command(label="Close Tab (Ctrl+W)", command=close_document)
+recent_menu = tk.Menu(file_menu, tearoff=0)
+file_menu.add_cascade(label="Open Recent", menu=recent_menu)
 file_menu.add_separator()
 file_menu.add_command(label="Exit", command=on_closing)
 menu_bar.add_cascade(label="File", menu=file_menu)
+
+view_menu = tk.Menu(menu_bar, tearoff=0)
+view_menu.add_command(label="Toggle Split View", command=toggle_split_view)
+menu_bar.add_cascade(label="View", menu=view_menu)
+
+markdown_menu = tk.Menu(menu_bar, tearoff=0)
+markdown_menu.add_command(label="Live Preview", command=open_markdown_preview)
+markdown_menu.add_separator()
+markdown_menu.add_command(label="Export as HTML", command=export_markdown_html)
+markdown_menu.add_command(label="Export as PDF", command=export_markdown_pdf)
+menu_bar.add_cascade(label="Markdown", menu=markdown_menu)
 
 edit_menu = tk.Menu(menu_bar, tearoff=0)
 
@@ -1078,7 +1732,14 @@ menu_bar.add_cascade(label="Help", menu=help_menu)
 root.config(menu=menu_bar)
 
 current_theme = load_settings()
+editor_notebook.bind("<<NotebookTabChanged>>", _set_active_document)
+create_document()
 apply_theme(current_theme)
+_load_recent_files()
+_refresh_recent_menu()
+_restore_session()
+apply_theme(current_theme)
+root.after(2000, _autosave_tick)
 
 
 # --- Plugin system -------------------------------------------------
@@ -1154,6 +1815,7 @@ def _add_menu(name):
 PLUGIN_API = {
     'root': root,
     'text_area': text_area,
+    'get_active_text_area': lambda: text_area,
     'menu_bar': menu_bar,
     'add_menu': _add_menu,
     'resource_path': resource_path,
@@ -1296,17 +1958,29 @@ def _bind_shortcuts():
             traceback.print_exc()
         return "break"
 
+    def _close(event=None):
+        close_document()
+        return "break"
+
+    def _markdown_preview(event=None):
+        open_markdown_preview()
+        return "break"
+
     # Bind for Control on Windows/Linux and Command on macOS where appropriate
     root.bind_all('<Control-s>', _save)
     root.bind_all('<Control-Shift-S>', _save_as)
     root.bind_all('<Control-o>', _open)
     root.bind_all('<Control-n>', _new)
+    root.bind_all('<Control-w>', _close)
+    root.bind_all('<Control-Shift-m>', _markdown_preview)
     try:
         if platform.system() == 'Darwin':
             root.bind_all('<Command-s>', _save)
             root.bind_all('<Command-Shift-S>', _save_as)
             root.bind_all('<Command-o>', _open)
             root.bind_all('<Command-n>', _new)
+            root.bind_all('<Command-w>', _close)
+            root.bind_all('<Command-Shift-m>', _markdown_preview)
     except Exception:
         pass
 
