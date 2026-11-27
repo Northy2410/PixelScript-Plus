@@ -53,7 +53,13 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install requests cryptography pillow pyinstaller
+          pip install requests cryptography pillow pyinstaller pytest
+
+      - name: Test app features
+        shell: bash
+        run: |
+          python -m pytest -q
+          python -m py_compile PixelScript.py pixelscript_markdown.py
 
       # The app expects Icon.png and logo.png next to the code. Yours may be in an
       # assets/ folder with different capitalisation, so find them and copy them.
