@@ -154,6 +154,7 @@ jobs:
           }
           place icon.png Icon.png linux
           place icon.ico Icon.ico windows
+          place inslogo.bmp inslogo.bmp windows
           if [ -n "$(find_file Licence.txt)" ]; then place Licence.txt Licence.txt windows; else place Licence Licence.txt windows; fi
 
       # ---------- Windows: NSIS installer from your installer.nsi ----------
@@ -162,8 +163,6 @@ jobs:
         shell: bash
         run: |
           choco install nsis -y --no-progress
-          # inslogo isn't used, so drop that line (only on the build machine)
-          sed -i '/inslogo/d' installer.nsi
           "/c/Program Files (x86)/NSIS/makensis.exe" installer.nsi
           mkdir installer_out
           cp "PixelScript+ Setup.exe" installer_out/
